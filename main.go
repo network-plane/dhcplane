@@ -7,7 +7,6 @@ import (
 	"dhcplane/statistics"
 	"encoding/json"
 	"fmt"
-	planeconsole "github.com/network-plane/planeconsole"
 	"io"
 	"log"
 	"net"
@@ -16,10 +15,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"text/tabwriter"
 	"time"
+
+	planeconsole "github.com/network-plane/planeconsole"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/logrusorgru/aurora"
@@ -27,7 +29,7 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-var appVersion = "0.1.43"
+var appVersion = "0.1.47"
 
 func buildConsoleConfig(maxLines int) planeconsole.Config {
 	if maxLines <= 0 {
@@ -66,13 +68,135 @@ func consoleSocketCandidates() []string {
 	return candidates
 }
 
-// buildConsoleBroker wires the generic console broker with our DHCP-specific counters and highlights.
+// multiListener wraps multiple net.Listeners and multiplexes Accept() across them.
+type multiListener struct {
+	listeners []net.Listener
+	connCh    chan net.Conn
+	errCh     chan error
+	closeCh   chan struct{}
+	closeOnce sync.Once
+}
 
-func buildConsoleBroker(maxLines int) *planeconsole.Broker {
-	return planeconsole.NewBroker(planeconsole.BrokerOptions{
-		Config:           buildConsoleConfig(maxLines),
-		SocketCandidates: consoleSocketCandidates(),
+func newMultiListener(listeners ...net.Listener) *multiListener {
+	ml := &multiListener{
+		listeners: listeners,
+		connCh:    make(chan net.Conn),
+		errCh:     make(chan error, 1),
+		closeCh:   make(chan struct{}),
+	}
+	for _, ln := range listeners {
+		go ml.acceptLoop(ln)
+	}
+	return ml
+}
+
+func (ml *multiListener) acceptLoop(ln net.Listener) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-ml.closeCh:
+				return
+			case ml.errCh <- err:
+			default:
+			}
+			return
+		}
+		select {
+		case ml.connCh <- conn:
+		case <-ml.closeCh:
+			conn.Close()
+			return
+		}
+	}
+}
+
+func (ml *multiListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-ml.connCh:
+		return conn, nil
+	case err := <-ml.errCh:
+		return nil, err
+	case <-ml.closeCh:
+		return nil, net.ErrClosed
+	}
+}
+
+func (ml *multiListener) Close() error {
+	ml.closeOnce.Do(func() {
+		close(ml.closeCh)
 	})
+	var lastErr error
+	for _, ln := range ml.listeners {
+		if err := ln.Close(); err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+func (ml *multiListener) Addr() net.Addr {
+	if len(ml.listeners) > 0 {
+		return ml.listeners[0].Addr()
+	}
+	return nil
+}
+
+// buildConsoleBroker wires the generic console broker with our DHCP-specific counters and highlights.
+// If tcpAddr is non-empty (e.g., "0.0.0.0:9090"), it listens on both UNIX socket AND TCP.
+// If tcpAddr is empty, it only listens on UNIX socket.
+func buildConsoleBroker(maxLines int, tcpAddr string) (*planeconsole.Broker, string) {
+	opts := planeconsole.BrokerOptions{
+		Config: buildConsoleConfig(maxLines),
+	}
+
+	if tcpAddr != "" {
+		// Listen on BOTH UNIX socket and TCP using multiListener
+		opts.ListenerFactory = func() (string, net.Listener, error) {
+			var listeners []net.Listener
+			var addrs []string
+
+			// Try to create UNIX socket listener
+			for _, sockPath := range consoleSocketCandidates() {
+				// Remove stale socket file if it exists
+				_ = os.Remove(sockPath)
+				// Ensure directory exists
+				if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+					continue
+				}
+				unixLn, err := net.Listen("unix", sockPath)
+				if err == nil {
+					listeners = append(listeners, unixLn)
+					addrs = append(addrs, "unix:"+sockPath)
+					break
+				}
+			}
+
+			// Create TCP listener
+			tcpLn, err := net.Listen("tcp", tcpAddr)
+			if err != nil {
+				// Close any UNIX listener we created
+				for _, ln := range listeners {
+					ln.Close()
+				}
+				return "", nil, fmt.Errorf("tcp listen %s: %w", tcpAddr, err)
+			}
+			listeners = append(listeners, tcpLn)
+			addrs = append(addrs, "tcp:"+tcpLn.Addr().String())
+
+			if len(listeners) == 0 {
+				return "", nil, fmt.Errorf("failed to create any listeners")
+			}
+
+			ml := newMultiListener(listeners...)
+			return strings.Join(addrs, ", "), ml, nil
+		}
+		return planeconsole.NewBroker(opts), tcpAddr
+	}
+
+	// Default: UNIX socket only
+	opts.SocketCandidates = consoleSocketCandidates()
+	return planeconsole.NewBroker(opts), ""
 }
 
 /* ----------------- Logging ----------------- */
@@ -169,18 +293,26 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 		}
 	}()
 
-	// Optional console broker (exports console over UNIX socket)
+	// Optional console broker (exports console over UNIX socket and/or TCP)
 	var consoleBroker *planeconsole.Broker
 	if enableConsole {
 		maxLines := cfg.ConsoleMaxLines
 		if maxLines <= 0 {
 			maxLines = planeconsole.DefaultMaxLines
 		}
-		consoleBroker = buildConsoleBroker(maxLines)
+		var tcpAddr string
+		consoleBroker, tcpAddr = buildConsoleBroker(maxLines, cfg.ConsoleTCPAddress)
 		if err := consoleBroker.Start(); err != nil {
 			return fmt.Errorf("console broker: %w", err)
 		}
 		defer consoleBroker.Stop()
+
+		// Log which mode we're using
+		if tcpAddr != "" {
+			log.Printf("CONSOLE listening on UNIX socket + TCP %s", tcpAddr)
+		} else {
+			log.Printf("CONSOLE listening on UNIX socket")
+		}
 	}
 
 	// Sinks
@@ -563,6 +695,7 @@ func loadDBAndConfig(cfgPath string) (*dhcpserver.LeaseDB, config.Config, error)
 
 func addConsoleCommands(root *cobra.Command) {
 	var socket string
+	var tcpAddr string
 	var transparent bool
 
 	consoleCmd := &cobra.Command{
@@ -572,11 +705,9 @@ func addConsoleCommands(root *cobra.Command) {
 
 	attachCmd := &cobra.Command{
 		Use:   "attach",
-		Short: "Attach to the running console via UNIX socket",
+		Short: "Attach to the running console via UNIX socket or TCP",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return planeconsole.Attach(planeconsole.AttachOptions{
-				Socket:            socket,
-				SocketCandidates:  consoleSocketCandidates(),
+			opts := planeconsole.AttachOptions{
 				Transparent:       transparent,
 				Title:             "DHCPlane Console (attached)",
 				DisconnectMessage: "[notice] disconnected from server",
@@ -586,10 +717,24 @@ func addConsoleCommands(root *cobra.Command) {
 						os.Exit(code)
 					}()
 				},
-			})
+			}
+
+			if tcpAddr != "" {
+				// Connect via TCP using SocketResolver
+				opts.SocketResolver = func() (string, error) {
+					return tcpAddr, nil
+				}
+			} else {
+				// Default: UNIX socket
+				opts.Socket = socket
+				opts.SocketCandidates = consoleSocketCandidates()
+			}
+
+			return planeconsole.Attach(opts)
 		},
 	}
 	attachCmd.Flags().StringVar(&socket, "socket", "", "UNIX socket path override")
+	attachCmd.Flags().StringVar(&tcpAddr, "tcp", "", "TCP address to connect to (e.g., 192.168.1.2:9090 or localhost:9090)")
 	attachCmd.Flags().BoolVar(&transparent, "transparent", false, "Use terminal background")
 
 	consoleCmd.AddCommand(attachCmd)
@@ -617,7 +762,7 @@ func main() {
 	root.PersistentFlags().BoolVarP(&showVersion, "version", "", false, "Print version and exit")
 	root.PersistentFlags().StringVarP(&cfgPath, "config", "", "dhcplane.json", "Path to JSON config")
 	// authoritative is now config-driven; flag removed
-	root.PersistentFlags().BoolVar(&console, "console", false, "Export console over UNIX socket in addition to stdout/stderr logging")
+	root.PersistentFlags().BoolVar(&console, "console", false, "Export console over UNIX socket (or TCP if console_tcp_address is set) in addition to stdout/stderr logging")
 
 	// Inject the client-side attach command into this binary.
 	addConsoleCommands(root)
@@ -1140,6 +1285,7 @@ func ensureDefaultConfig(cfgPath string) error {
 		"equipment_types":          []string{},
 		"management_types":         []string{},
 		"console_max_lines":        10000,
+		"console_tcp_address":      "", // empty = UNIX socket; e.g., "0.0.0.0:9090" for TCP
 		"logging": map[string]any{
 			"path":        "",
 			"filename":    "dhcplane.log",

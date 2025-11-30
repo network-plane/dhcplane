@@ -152,6 +152,9 @@ type Config struct {
 	// Max console buffer
 	ConsoleMaxLines int `json:"console_max_lines,omitempty"`
 
+	// Console TCP address (e.g., "0.0.0.0:9090" or ":9090"); empty = UNIX socket only
+	ConsoleTCPAddress string `json:"console_tcp_address,omitempty"`
+
 	// Log rotation settings
 	Logging LoggingConfig `json:"logging"`
 
