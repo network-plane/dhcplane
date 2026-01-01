@@ -307,25 +307,29 @@ func (db *LeaseDB) removeExpiredOlderThan(grace time.Duration) int {
 // Server is the DHCP engine. It holds only DHCP-domain state and foreign providers.
 // It never stores the Config itself; it calls cfgGet() per-request.
 type Server struct {
-	mu        sync.RWMutex
-	db        *LeaseDB
-	cfgGet    func() *config.Config
-	authorGet func() bool
-	logSink   func(string, ...any)
-	errorSink func(string, ...any)
-	now       func() time.Time
-	closer    io.Closer // active listener from BindAndServe
+	mu             sync.RWMutex
+	db             *LeaseDB
+	cfgGet         func() *config.Config
+	reservationsGet func() config.Reservations
+	authorGet      func() bool
+	logSink        func(string, ...any)
+	errorSink      func(string, ...any)
+	now            func() time.Time
+	closer         io.Closer // active listener from BindAndServe
 }
 
 // NewServer builds a decoupled server. Sinks may be nil.
-func NewServer(db *LeaseDB, cfgGet func() *config.Config, authorGet func() bool, logSink func(string, ...any), errorSink func(string, ...any)) *Server {
+func NewServer(db *LeaseDB, cfgGet func() *config.Config, reservationsGet func() config.Reservations, authorGet func() bool, logSink func(string, ...any), errorSink func(string, ...any)) *Server {
 	if cfgGet == nil {
 		cfgGet = func() *config.Config { return nil }
+	}
+	if reservationsGet == nil {
+		reservationsGet = func() config.Reservations { return nil }
 	}
 	if authorGet == nil {
 		authorGet = func() bool { return true }
 	}
-	return &Server{db: db, cfgGet: cfgGet, authorGet: authorGet, logSink: logSink, errorSink: errorSink, now: time.Now}
+	return &Server{db: db, cfgGet: cfgGet, reservationsGet: reservationsGet, authorGet: authorGet, logSink: logSink, errorSink: errorSink, now: time.Now}
 }
 
 // BindAndServe binds to iface on UDP/67 and serves in a goroutine. Returns an io.Closer for shutdown.
@@ -377,6 +381,7 @@ func (s *Server) Handler(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCPv4)
 		s.errorf("no config available")
 		return
 	}
+	reservations := s.reservationsGet()
 	authoritative := s.authorGet()
 	_, subnet := mustCIDR(cfg.SubnetCIDR)
 	serverIP := ParseIP4(cfg.ServerIP)
@@ -471,7 +476,7 @@ func (s *Server) Handler(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCPv4)
 			}
 			return
 		}
-		if rmac := s.macForReservedIP(cfg, reqIP); rmac != "" && !macEqual(rmac, mac) {
+		if rmac := s.macForReservedIP(reservations, reqIP); rmac != "" && !macEqual(rmac, mac) {
 			s.logf("REQUEST %s asked for reserved ip=%s owned by %s -> NAK", dispMAC, reqIP, rmac)
 			if authoritative {
 				nak, _ := dhcpv4.NewReplyFromRequest(req)
@@ -547,8 +552,8 @@ func (s *Server) isExcluded(cfg *config.Config, ip net.IP) bool {
 	return false
 }
 
-func (s *Server) macForReservedIP(cfg *config.Config, ip net.IP) string {
-	for m, r := range cfg.Reservations {
+func (s *Server) macForReservedIP(reservations config.Reservations, ip net.IP) string {
+	for m, r := range reservations {
 		if r.IP == ip.String() {
 			if nm, err := normalizeMACFlexible(m); err == nil {
 				return nm
@@ -561,6 +566,7 @@ func (s *Server) macForReservedIP(cfg *config.Config, ip net.IP) string {
 
 // chooseIPForMAC implements the same 5-step policy as before.
 func (s *Server) chooseIPForMAC(cfg *config.Config, mac string) (net.IP, bool) {
+	reservations := s.reservationsGet()
 	_, subnet := mustCIDR(cfg.SubnetCIDR)
 	serverIP := ParseIP4(cfg.ServerIP)
 	gatewayIP := ParseIP4(cfg.Gateway)
@@ -576,13 +582,13 @@ func (s *Server) chooseIPForMAC(cfg *config.Config, mac string) (net.IP, bool) {
 		if ip.Equal(network) || ip.Equal(bcast) {
 			return true
 		}
-		if rmac := s.macForReservedIP(cfg, ip); rmac != "" && !macEqual(rmac, mac) {
+		if rmac := s.macForReservedIP(reservations, ip); rmac != "" && !macEqual(rmac, mac) {
 			return true
 		}
 		return false
 	}
 	// 1) Reservation
-	if rv, ok := cfg.Reservations[mac]; ok {
+	if rv, ok := reservations[mac]; ok {
 		ip := ParseIP4(rv.IP)
 		if ip == nil || isBad(ip) {
 			return nil, false
@@ -627,7 +633,7 @@ func (s *Server) chooseIPForMAC(cfg *config.Config, mac string) (net.IP, bool) {
 				continue
 			}
 			if l, ok := s.db.FindByIP(ip.String()); ok {
-				rmac := s.macForReservedIP(cfg, ip)
+				rmac := s.macForReservedIP(reservations, ip)
 				if now > l.Expiry && (macEqual(l.MAC, mac) || rmac == "" || macEqual(rmac, mac)) {
 					return ip, true
 				}
@@ -839,10 +845,10 @@ func parseUserClass77(b []byte) []string {
 /* ----------------- Cross-package helpers (exported) ----------------- */
 
 // EnforceReservationLeaseConsistency ensures reservations win over leases.
-func EnforceReservationLeaseConsistency(db *LeaseDB, cfg *config.Config) {
+func EnforceReservationLeaseConsistency(db *LeaseDB, reservations config.Reservations) {
 	db.mu.Lock()
 	changed := false
-	for mac, r := range cfg.Reservations {
+	for mac, r := range reservations {
 		norm := strings.ToLower(mac)
 		if l, ok := db.ByIP[r.IP]; ok && !macEqual(l.MAC, norm) {
 			delete(db.ByMAC, strings.ToLower(l.MAC))

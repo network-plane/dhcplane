@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -96,8 +97,9 @@ type Config struct {
 	CompactOnLoad bool     `json:"compact_on_load"`
 	DNS           []string `json:"dns"`
 	Domain        string   `json:"domain,omitempty"`
-	LeaseDBPath   string   `json:"lease_db_path,omitempty"`
-	PIDFile       string   `json:"pid_file,omitempty"`
+	LeaseDBPath     string   `json:"lease_db_path,omitempty"`
+	PIDFile         string   `json:"pid_file,omitempty"`
+	ReservationsPath string   `json:"reservations_path,omitempty"`
 
 	// Authoritative mode: when true, server sends NAKs on invalid requests.
 	// Nil means "unset" and defaults to true.
@@ -107,9 +109,8 @@ type Config struct {
 	LeaseStickySeconds int  `json:"lease_sticky_seconds,omitempty"`
 	AutoReload         bool `json:"auto_reload,omitempty"`
 
-	Pools        []Pool       `json:"pools"`
-	Exclusions   []string     `json:"exclusions,omitempty"`
-	Reservations Reservations `json:"reservations,omitempty"`
+	Pools      []Pool   `json:"pools"`
+	Exclusions []string `json:"exclusions,omitempty"`
 
 	NTP            []string `json:"ntp,omitempty"`
 	MTU            int      `json:"mtu,omitempty"`
@@ -225,26 +226,68 @@ func locateJSONError(data []byte, off int64) (line, col int) {
 	return
 }
 
+// LoadReservations reads reservations from the specified file path.
+func LoadReservations(path string) (Reservations, error) {
+	reservations := make(Reservations)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist yet, return empty reservations
+			return reservations, nil
+		}
+		return nil, err
+	}
+	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&reservations); err != nil {
+		return nil, fmt.Errorf("reservations file %s: %w", path, err)
+	}
+	return reservations, nil
+}
+
+// SaveReservations writes reservations to the specified file path.
+func SaveReservations(path string, reservations Reservations) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil && !os.IsExist(err) {
+		return err
+	}
+	tmp := path + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(&reservations); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	_ = f.Sync()
+	_ = f.Close()
+	return os.Rename(tmp, path)
+}
+
 // ParseStrict reads the config file strictly (unknown fields rejected) and
 // preserves the same defaults/behavior as the original parseConfigStrict.
-func ParseStrict(path string) (Config, *JSONErr) {
+// Returns config and reservations loaded from separate file.
+func ParseStrict(path string) (Config, Reservations, string, *JSONErr) {
 	var cfg Config
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return cfg, &JSONErr{Err: err}
+		return cfg, nil, "", &JSONErr{Err: err}
 	}
 	dec := json.NewDecoder(strings.NewReader(string(data)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
 		if se, ok := err.(*json.SyntaxError); ok {
 			line, col := locateJSONError(data, se.Offset)
-			return cfg, &JSONErr{Err: err, Line: line, Column: col}
+			return cfg, nil, "", &JSONErr{Err: err, Line: line, Column: col}
 		}
 		if ute, ok := err.(*json.UnmarshalTypeError); ok {
 			line, col := locateJSONError(data, ute.Offset)
-			return cfg, &JSONErr{Err: err, Line: line, Column: col}
+			return cfg, nil, "", &JSONErr{Err: err, Line: line, Column: col}
 		}
-		return cfg, &JSONErr{Err: err}
+		return cfg, nil, "", &JSONErr{Err: err}
 	}
 	// defaults
 	if cfg.LeaseSeconds <= 0 {
@@ -254,12 +297,28 @@ func ParseStrict(path string) (Config, *JSONErr) {
 		cfg.LeaseStickySeconds = 86400 // default sticky window
 	}
 	if len(cfg.Pools) == 0 {
-		return cfg, &JSONErr{Err: errors.New("config: at least one pool required")}
+		return cfg, nil, "", &JSONErr{Err: errors.New("config: at least one pool required")}
 	}
-	if cfg.Reservations == nil {
-		cfg.Reservations = make(Reservations)
+	
+	// Load reservations from separate file
+	reservationsPath := cfg.ReservationsPath
+	if reservationsPath == "" {
+		// Default to same directory as config file
+		cfgDir := filepath.Dir(path)
+		reservationsPath = filepath.Join(cfgDir, "dhcplane.reservations")
+	} else if !filepath.IsAbs(reservationsPath) {
+		// Relative path: resolve relative to config file directory
+		cfgDir := filepath.Dir(path)
+		reservationsPath = filepath.Join(cfgDir, reservationsPath)
 	}
-	return cfg, nil
+	
+	reservations, err := LoadReservations(reservationsPath)
+	if err != nil {
+		return cfg, nil, "", &JSONErr{Err: fmt.Errorf("load reservations: %w", err)}
+	}
+	cfg.ReservationsPath = reservationsPath // Store resolved path
+	
+	return cfg, reservations, reservationsPath, nil
 }
 
 /* ----------------- Small helpers (package-local) ----------------- */
@@ -341,32 +400,6 @@ func ValidateAndNormalizeConfig(cfg Config) (Config, []string, error) {
 		c.ManagementTypes = []string{"ssh", "web", "telnet", "serial", "console"}
 	}
 
-	if c.Reservations == nil {
-		c.Reservations = make(Reservations)
-	} else {
-		norm := make(Reservations, len(c.Reservations))
-		for m, rv := range c.Reservations {
-			nm, err := normalizeMACFlexible(m)
-			if err != nil {
-				return cfg, warns, fmt.Errorf("bad reservation MAC %q: %w", m, err)
-			}
-			if rv.EquipmentType != "" && !stringInSlice(rv.EquipmentType, c.EquipmentTypes) {
-				warns = append(warns, fmt.Sprintf("warning: reservation %s has unknown equipment_type %q; allowed: %v",
-					nm, rv.EquipmentType, c.EquipmentTypes))
-			}
-			if rv.ManagementType != "" && !stringInSlice(rv.ManagementType, c.ManagementTypes) {
-				warns = append(warns, fmt.Sprintf("warning: reservation %s has unknown management_type %q; allowed: %v",
-					nm, rv.ManagementType, c.ManagementTypes))
-			}
-			ip := parseIPv4(rv.IP)
-			if ip == nil {
-				return cfg, warns, fmt.Errorf("bad reservation IP %q", rv.IP)
-			}
-			rv.IP = ip.String()
-			norm[nm] = rv
-		}
-		c.Reservations = norm
-	}
 
 	if c.DeviceOverrides == nil {
 		c.DeviceOverrides = make(map[string]DeviceOverride)

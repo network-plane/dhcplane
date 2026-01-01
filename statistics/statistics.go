@@ -122,6 +122,7 @@ func ClassifyLeases(iter LeaseIter, assumeLeaseDur time.Duration, now time.Time)
 // It fills MAC/Hostname/AllocatedAt/Expiry when available (leased rows).
 func BuildDetailRows(
 	cfg config.Config,
+	reservations config.Reservations,
 	iter LeaseIter,
 	isDeclined func(string) bool,
 	isBannedMAC func(string) bool,
@@ -190,7 +191,7 @@ func BuildDetailRows(
 	// Reservations (map IP -> MAC as stored; assume cfg may already be normalized via validation step)
 	reservedIPs := make(map[string]struct{})
 	reservedIPToMAC := make(map[string]string)
-	for macKey, r := range cfg.Reservations {
+	for macKey, r := range reservations {
 		if ip := net.ParseIP(strings.TrimSpace(r.IP)).To4(); ip != nil {
 			s := ip.String()
 			reservedIPs[s] = struct{}{}
@@ -345,6 +346,7 @@ func PrintDetailsTable(title string, rows []DetailRow, assumeLeaseDur time.Durat
 //	dark dark gray  █ = unused host IP outside all configured pools
 func DrawSubnetGrid(
 	cfg config.Config,
+	reservations config.Reservations,
 	iter LeaseIter,
 	isDeclined func(string) bool,
 	isBannedMAC func(string) bool,
@@ -423,7 +425,7 @@ func DrawSubnetGrid(
 
 	// Reservations (IP -> MAC display)
 	reservedIPs := make(map[string]struct{})
-	for _, r := range cfg.Reservations {
+	for _, r := range reservations {
 		if ip := net.ParseIP(strings.TrimSpace(r.IP)).To4(); ip != nil {
 			reservedIPs[ip.String()] = struct{}{}
 		}

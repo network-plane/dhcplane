@@ -125,18 +125,7 @@ The server loads a strict JSON file (unknown fields are rejected). On `serve` st
     {"start": "192.168.178.50", "end": "192.168.178.199"}
   ],
   "exclusions": ["192.168.178.100"],
-
-  "reservations": {
-    "aa:bb:cc:dd:ee:ff": {
-      "ip": "192.168.178.10",
-      "note": "laser printer",
-      "first_seen": 1725550000,
-      "equipment_type": "Printer",
-      "manufacturer": "HP",
-      "management_type": "web",
-      "management_interface": "http://192.168.178.10"
-    }
-  },
+  "reservations_path": "dhcplane.reservations",
 
   "ntp": ["192.168.178.1"],
   "mtu": 1500,
@@ -209,6 +198,7 @@ Defaults:
 - Unknown fields are rejected (strict mode)
 - `lease_db_path`: defaults to `leases.json` when omitted
 - `pid_file`: defaults to `dhcplane.pid` when omitted
+- `reservations_path`: defaults to `dhcplane.reservations` when omitted (relative paths are resolved relative to config file directory)
 - `authoritative`: defaults to `true` when unset
 - `equipment_types`: defaults to `["Switch","Router","AP","Modem","Gateway"]` when empty
 - `management_types`: defaults to `["ssh","web","telnet","serial","console"]` when empty
@@ -243,9 +233,7 @@ Defaults:
     {"start":"192.168.178.50","end":"192.168.178.199"}
   ],
   "exclusions": ["192.168.178.100"],
-  "reservations": {
-    "aa:bb:cc:dd:ee:ff":{"ip":"192.168.178.10","note":"printer"}
-  },
+  "reservations_path": "dhcplane.reservations",
   "domain": "lan",
   "ntp": ["192.168.178.1"],
   "mtu": 1500,
@@ -287,21 +275,25 @@ Defaults:
 }
 ```
 
-### Reservations format (with metadata)
+### Reservations
 
-`reservations` keys are MACs (accept `aa:bb:...`, `aa-bb-...`, or `aabb...`). Values:
+Reservations are stored in a separate JSON file (default: `dhcplane.reservations`, configurable via `reservations_path`). The file format is a map of MAC addresses to reservation objects:
 
 ```json
 {
-  "ip": "192.168.178.10",
-  "note": "human note",
-  "first_seen": 1725550000,
-  "equipment_type": "Switch",
-  "manufacturer": "Ubiquiti",
-  "management_type": "web",
-  "management_interface": "https://192.168.178.10"
+  "aa:bb:cc:dd:ee:ff": {
+    "ip": "192.168.178.10",
+    "note": "human note",
+    "first_seen": 1725550000,
+    "equipment_type": "Switch",
+    "manufacturer": "Ubiquiti",
+    "management_type": "web",
+    "management_interface": "https://192.168.178.10"
+  }
 }
 ```
+
+MAC keys accept `aa:bb:...`, `aa-bb-...`, or `aabb...` formats.
 
 > Backwards compatible: the legacy `{"mac":"ip"}` style is also accepted on load.
 

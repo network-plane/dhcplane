@@ -268,7 +268,7 @@ func logDetect(cfg *config.Config, iface string, logSink func(string, ...any)) {
 // buildServerAndRun starts the DHCP server and optional console broker, handles reloads and signals.
 func buildServerAndRun(cfgPath string, enableConsole bool) error {
 	// Load + validate/normalize initial config
-	raw, jerr := config.ParseStrict(cfgPath)
+	raw, reservations, reservationsPath, jerr := config.ParseStrict(cfgPath)
 	if jerr != nil {
 		return fmt.Errorf("config error: %w", jerr)
 	}
@@ -352,6 +352,11 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 	var cfgAtomic atomic.Value
 	cfgAtomic.Store(&cfg)
 	cfgGet := func() *config.Config { return cfgAtomic.Load().(*config.Config) }
+	
+	// Atomic reservations snapshot
+	var reservationsAtomic atomic.Value
+	reservationsAtomic.Store(reservations)
+	reservationsGet := func() config.Reservations { return reservationsAtomic.Load().(config.Reservations) }
 
 	// Authoritative getter from config (default: true when unset)
 	effectiveAuthoritative := func(c *config.Config) bool {
@@ -371,7 +376,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 	}
 
 	// Enforce reservations immediately
-	dhcpserver.EnforceReservationLeaseConsistency(db, &cfg)
+	dhcpserver.EnforceReservationLeaseConsistency(db, reservations)
 
 	// PID
 	if err := writePID(cfg.PIDFile); err != nil {
@@ -379,7 +384,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 	}
 
 	// Decoupled DHCP server
-	s := dhcpserver.NewServer(db, cfgGet, authorGet, logSink, errorSink)
+	s := dhcpserver.NewServer(db, cfgGet, reservationsGet, authorGet, logSink, errorSink)
 
 	// Bind + Serve, with rebind support when Interface changes
 	laddr := &net.UDPAddr{IP: net.ParseIP("0.0.0.0"), Port: 67}
@@ -424,7 +429,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 			defer timer.Stop()
 			select {
 			case <-timer.C:
-				triggerARPScan(cfgGet, db, currentIface, logSink, errorSink, false)
+				triggerARPScan(cfgGet, reservationsGet, db, currentIface, logSink, errorSink, false)
 			case <-stopARP:
 				return
 			}
@@ -433,7 +438,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 			for {
 				select {
 				case <-tk.C:
-					triggerARPScan(cfgGet, db, currentIface, logSink, errorSink, false)
+					triggerARPScan(cfgGet, reservationsGet, db, currentIface, logSink, errorSink, false)
 				case <-stopARP:
 					return
 				}
@@ -474,17 +479,18 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 	// Optional auto-reload watcher
 	var watcher *fsnotify.Watcher
 	var watcherErr error
-	if cfg.AutoReload {
-		watcher, watcherErr = startConfigWatcher(cfgPath, func(newCfg config.Config, newWarns []string) {
+		if cfg.AutoReload {
+			watcher, watcherErr = startConfigWatcher(cfgPath, reservationsPath, func(newCfg config.Config, newReservations config.Reservations, newWarns []string) {
 			// Compare authoritative before swapping
 			oldAuth := effectiveAuthoritative(cfgGet())
 			newAuth := effectiveAuthoritative(&newCfg)
 
 			cfgAtomic.Store(&newCfg)
+			reservationsAtomic.Store(newReservations)
 			for _, w := range newWarns {
 				logSink("%s", w)
 			}
-			dhcpserver.EnforceReservationLeaseConsistency(db, &newCfg)
+			dhcpserver.EnforceReservationLeaseConsistency(db, newReservations)
 			if newCfg.CompactOnLoad {
 				if n := db.CompactNow(time.Duration(newCfg.LeaseStickySeconds) * time.Second); n > 0 {
 					logSink("LEASE-COMPACT removed=%d (on auto-reload)", n)
@@ -518,31 +524,39 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 	for sig := range sigc {
 		switch sig {
 		case syscall.SIGHUP:
-			rawNew, jerr := config.ParseStrict(cfgPath)
+			rawNew, reservationsNew, reservationsPathNew, jerr := config.ParseStrict(cfgPath)
 			if jerr != nil {
 				logSink("RELOAD: config invalid, keeping old settings: %v", jerr)
 				continue
 			}
 			nowEpoch := time.Now().Unix()
-			changed := false
-			for k, v := range rawNew.Reservations {
+			reservationsChanged := false
+			for k, v := range reservationsNew {
 				if v.FirstSeen == 0 {
 					v.FirstSeen = nowEpoch
-					rawNew.Reservations[k] = v
-					changed = true
+					reservationsNew[k] = v
+					reservationsChanged = true
 				}
 			}
 			if rawNew.BannedMACs == nil {
 				rawNew.BannedMACs = make(map[string]config.DeviceMeta)
 			}
+			bannedChanged := false
 			for k, v := range rawNew.BannedMACs {
 				if v.FirstSeen == 0 {
 					v.FirstSeen = nowEpoch
 					rawNew.BannedMACs[k] = v
-					changed = true
+					bannedChanged = true
 				}
 			}
-			if changed {
+			if reservationsChanged {
+				// Save reservations to separate file
+				if err := config.SaveReservations(reservationsPathNew, reservationsNew); err != nil {
+					logSink("RELOAD: failed to persist reservations first_seen update: %v", err)
+				}
+			}
+			if bannedChanged {
+				// Save banned MACs back to config file
 				tmp := cfgPath + ".tmp"
 				if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err == nil {
 					if f2, err := os.Create(tmp); err == nil {
@@ -555,7 +569,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 						} else {
 							_ = f2.Close()
 							_ = os.Remove(tmp)
-							logSink("RELOAD: failed to persist first_seen update: %v", err)
+							logSink("RELOAD: failed to persist banned_macs first_seen update: %v", err)
 						}
 					}
 				}
@@ -574,7 +588,8 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 			newAuth := effectiveAuthoritative(&newCfg)
 
 			cfgAtomic.Store(&newCfg)
-			dhcpserver.EnforceReservationLeaseConsistency(db, &newCfg)
+			reservationsAtomic.Store(reservationsNew)
+			dhcpserver.EnforceReservationLeaseConsistency(db, reservationsNew)
 			if newCfg.CompactOnLoad {
 				if n := db.CompactNow(time.Duration(newCfg.LeaseStickySeconds) * time.Second); n > 0 {
 					logSink("LEASE-COMPACT removed=%d (on config reload)", n)
@@ -612,11 +627,12 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 
 /* ----------------- Watcher ----------------- */
 
-// startConfigWatcher watches cfgPath and calls onApply(validatedCfg,warns) after successful parses.
+// startConfigWatcher watches cfgPath and reservations file, calls onApply(validatedCfg,reservations,warns) after successful parses.
 // It also performs the first_seen stamping persist just like the HUP path.
 func startConfigWatcher(
 	cfgPath string,
-	onApply func(config.Config, []string),
+	reservationsPath string,
+	onApply func(config.Config, config.Reservations, []string),
 	logf func(string, ...any),
 ) (*fsnotify.Watcher, error) {
 	w, err := fsnotify.NewWatcher()
@@ -628,6 +644,14 @@ func startConfigWatcher(
 		_ = w.Close()
 		return nil, err
 	}
+	// Also watch reservations file directory if different
+	if reservationsPath != "" && filepath.Dir(reservationsPath) != dir {
+		reservationsDir := filepath.Dir(reservationsPath)
+		if err := w.Add(reservationsDir); err != nil {
+			_ = w.Close()
+			return nil, err
+		}
+	}
 	go func() {
 		for {
 			select {
@@ -635,7 +659,14 @@ func startConfigWatcher(
 				if !ok {
 					return
 				}
-				if filepath.Clean(ev.Name) != filepath.Clean(cfgPath) {
+				evName := filepath.Clean(ev.Name)
+				cfgPathClean := filepath.Clean(cfgPath)
+				reservationsPathClean := ""
+				if reservationsPath != "" {
+					reservationsPathClean = filepath.Clean(reservationsPath)
+				}
+				// Watch both config and reservations file
+				if evName != cfgPathClean && evName != reservationsPathClean {
 					continue
 				}
 				if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Chmod) == 0 {
@@ -643,32 +674,41 @@ func startConfigWatcher(
 				}
 				time.Sleep(150 * time.Millisecond)
 
-				cfgNew, jerr := config.ParseStrict(cfgPath)
+				// Reload config and reservations
+				cfgNew, reservationsNew, reservationsPathNew, jerr := config.ParseStrict(cfgPath)
 				if jerr != nil {
 					logf("AUTO-RELOAD: config invalid, keeping old settings: %v", jerr)
 					continue
 				}
 
 				now := time.Now().Unix()
-				changed := false
-				for k, v := range cfgNew.Reservations {
+				reservationsChanged := false
+				for k, v := range reservationsNew {
 					if v.FirstSeen == 0 {
 						v.FirstSeen = now
-						cfgNew.Reservations[k] = v
-						changed = true
+						reservationsNew[k] = v
+						reservationsChanged = true
 					}
 				}
 				if cfgNew.BannedMACs == nil {
 					cfgNew.BannedMACs = make(map[string]config.DeviceMeta)
 				}
+				bannedChanged := false
 				for k, v := range cfgNew.BannedMACs {
 					if v.FirstSeen == 0 {
 						v.FirstSeen = now
 						cfgNew.BannedMACs[k] = v
-						changed = true
+						bannedChanged = true
 					}
 				}
-				if changed {
+				if reservationsChanged {
+					// Save reservations to separate file
+					if err := config.SaveReservations(reservationsPathNew, reservationsNew); err != nil {
+						logf("AUTO-RELOAD: failed to persist reservations first_seen: %v", err)
+					}
+				}
+				if bannedChanged {
+					// Save banned MACs back to config file
 					tmp := cfgPath + ".tmp"
 					if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err == nil {
 						if f, err := os.Create(tmp); err == nil {
@@ -681,7 +721,7 @@ func startConfigWatcher(
 							} else {
 								_ = f.Close()
 								_ = os.Remove(tmp)
-								logf("AUTO-RELOAD: failed to persist first_seen: %v", err)
+								logf("AUTO-RELOAD: failed to persist banned_macs first_seen: %v", err)
 							}
 						}
 					}
@@ -693,7 +733,7 @@ func startConfigWatcher(
 					continue
 				}
 
-				onApply(norm, warns)
+				onApply(norm, reservationsNew, warns)
 
 			case err := <-w.Errors:
 				logf("watcher error: %v", err)
@@ -705,20 +745,20 @@ func startConfigWatcher(
 
 /* ----------------- Stats helpers ----------------- */
 
-func loadDBAndConfig(cfgPath string) (*dhcpserver.LeaseDB, config.Config, error) {
-	raw, jerr := config.ParseStrict(cfgPath)
+func loadDBAndConfig(cfgPath string) (*dhcpserver.LeaseDB, config.Config, config.Reservations, error) {
+	raw, reservations, _, jerr := config.ParseStrict(cfgPath)
 	if jerr != nil {
-		return nil, config.Config{}, jerr
+		return nil, config.Config{}, nil, jerr
 	}
 	cfg, _, verr := config.ValidateAndNormalizeConfig(raw)
 	if verr != nil {
-		return nil, config.Config{}, verr
+		return nil, config.Config{}, nil, verr
 	}
 	db := dhcpserver.NewLeaseDB(cfg.LeaseDBPath)
 	if err := db.Load(); err != nil {
-		return nil, config.Config{}, err
+		return nil, config.Config{}, nil, err
 	}
-	return db, cfg, nil
+	return db, cfg, reservations, nil
 }
 
 /* ----------------- Cobra CLI ----------------- */
@@ -808,7 +848,7 @@ func main() {
 			}
 
 			// Validate config before start
-			if _, jerr := config.ParseStrict(cfgPath); jerr != nil {
+			if _, _, _, jerr := config.ParseStrict(cfgPath); jerr != nil {
 				return fmt.Errorf("config error: %w", jerr)
 			}
 
@@ -822,7 +862,7 @@ func main() {
 		Use:   "leases",
 		Short: "Print current leases",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			db, _, err := loadDBAndConfig(cfgPath)
+			db, _, _, err := loadDBAndConfig(cfgPath)
 			if err != nil {
 				return err
 			}
@@ -877,7 +917,7 @@ func main() {
 		Use:   "stats",
 		Short: "Show allocation rates and lease status (add --details for a full table, --grid for a colour grid)",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			db, cfg, err := loadDBAndConfig(cfgPath)
+			db, cfg, reservations, err := loadDBAndConfig(cfgPath)
 			if err != nil {
 				return err
 			}
@@ -930,7 +970,7 @@ func main() {
 				len(curr), len(expiring), len(expired))
 
 			if details {
-				rows, err := statistics.BuildDetailRows(cfg, iter, isDeclined, isBanned, now)
+				rows, err := statistics.BuildDetailRows(cfg, reservations, iter, isDeclined, isBanned, now)
 				if err != nil {
 					return err
 				}
@@ -938,7 +978,7 @@ func main() {
 			}
 
 			if grid {
-				if err := statistics.DrawSubnetGrid(cfg, iter, isDeclined, isBanned, 25, now); err != nil {
+				if err := statistics.DrawSubnetGrid(cfg, reservations, iter, isDeclined, isBanned, 25, now); err != nil {
 					return err
 				}
 			}
@@ -953,7 +993,7 @@ func main() {
 		Use:   "check",
 		Short: "Validate the JSON config and exit (reports line/column on errors)",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			_, jerr := config.ParseStrict(cfgPath)
+			_, _, _, jerr := config.ParseStrict(cfgPath)
 			if jerr != nil {
 				return jerr
 			}
@@ -968,7 +1008,7 @@ func main() {
 		Short: "Signal a running server to reload the config (SIGHUP via PID file)",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			// Check file is valid before signaling
-			raw, jerr := config.ParseStrict(cfgPath)
+			raw, _, _, jerr := config.ParseStrict(cfgPath)
 			if jerr != nil {
 				return fmt.Errorf("refusing to reload: config invalid: %w", jerr)
 			}
@@ -1012,7 +1052,7 @@ func main() {
 				note = strings.TrimSpace(strings.Join(args[2:], " "))
 			}
 
-			rawCfg, jerr := config.ParseStrict(cfgPath)
+			rawCfg, reservations, _, jerr := config.ParseStrict(cfgPath)
 			if jerr != nil {
 				return jerr
 			}
@@ -1026,7 +1066,7 @@ func main() {
 			}
 
 			// Conflict A: IP already reserved for someone else?
-			for macKey, res := range cfg.Reservations {
+			for macKey, res := range reservations {
 				if macEqual(macKey, norm) {
 					continue
 				}
@@ -1045,13 +1085,13 @@ func main() {
 			}
 
 			// Upsert reservation with first_seen epoch
-			if cfg.Reservations == nil {
-				cfg.Reservations = make(config.Reservations)
+			if reservations == nil {
+				reservations = make(config.Reservations)
 			}
 			now := time.Now().Unix()
-			prev, existed := cfg.Reservations[norm]
+			prev, existed := reservations[norm]
 			if !existed {
-				cfg.Reservations[norm] = config.Reservation{
+				reservations[norm] = config.Reservation{
 					IP:        ip.String(),
 					Note:      note,
 					FirstSeen: now,
@@ -1063,7 +1103,7 @@ func main() {
 				if fs == 0 {
 					fs = now
 				}
-				cfg.Reservations[norm] = config.Reservation{
+				reservations[norm] = config.Reservation{
 					IP:                  ip.String(),
 					Note:                note,
 					FirstSeen:           fs,
@@ -1076,25 +1116,9 @@ func main() {
 					norm, prev.IP, ip.String(), note, dhcpserver.FormatEpoch(fs))
 			}
 
-			// Write back (pretty)
-			tmp := cfgPath + ".tmp"
-			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil && !os.IsExist(err) {
-				return err
-			}
-			f, err := os.Create(tmp)
-			if err != nil {
-				return err
-			}
-			enc := json.NewEncoder(f)
-			enc.SetIndent("", "  ")
-			if err := enc.Encode(&cfg); err != nil {
-				f.Close()
-				_ = os.Remove(tmp)
-				return err
-			}
-			_ = f.Sync()
-			_ = f.Close()
-			if err := os.Rename(tmp, cfgPath); err != nil {
+			// Write reservations to separate file
+			_, _, reservationsPath, _ := config.ParseStrict(cfgPath)
+			if err := config.SaveReservations(reservationsPath, reservations); err != nil {
 				return err
 			}
 			return nil
@@ -1110,45 +1134,26 @@ func main() {
 			if err != nil {
 				return errf("invalid mac: %v", err)
 			}
-			rawCfg, jerr := config.ParseStrict(cfgPath)
+			_, reservations, _, jerr := config.ParseStrict(cfgPath)
 			if jerr != nil {
 				return jerr
 			}
-			cfg, _, verr := config.ValidateAndNormalizeConfig(rawCfg)
-			if verr != nil {
-				return verr
-			}
-			if cfg.Reservations == nil {
+			if reservations == nil {
 				fmt.Println("Nothing to remove: no reservations")
 				return nil
 			}
-			if _, ok := cfg.Reservations[norm]; !ok {
+			if _, ok := reservations[norm]; !ok {
 				fmt.Printf("No reservation for %s\n", norm)
 				return nil
 			}
-			delete(cfg.Reservations, norm)
+			delete(reservations, norm)
 
-			tmp := cfgPath + ".tmp"
-			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil && !os.IsExist(err) {
+			// Write reservations to separate file
+			_, _, reservationsPath, _ := config.ParseStrict(cfgPath)
+			if err := config.SaveReservations(reservationsPath, reservations); err != nil {
 				return err
 			}
-			f, err := os.Create(tmp)
-			if err != nil {
-				return err
-			}
-			enc := json.NewEncoder(f)
-			enc.SetIndent("", "  ")
-			if err := enc.Encode(&cfg); err != nil {
-				f.Close()
-				_ = os.Remove(tmp)
-				return err
-			}
-			_ = f.Sync()
-			_ = f.Close()
-			if err := os.Rename(tmp, cfgPath); err != nil {
-				return err
-			}
-			fmt.Printf("Reservation removed: %s in %s\n", norm, cfgPath)
+			fmt.Printf("Reservation removed: %s in %s\n", norm, reservationsPath)
 			return nil
 		},
 	}
@@ -1163,12 +1168,12 @@ func main() {
 		Use:   "arp",
 		Short: "Scan/read ARP and print a table; Linux scans, macOS/Windows read cache",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			cfg := cfgGetForCLI(cfgPath) // keep your helper
+			cfg, reservations := cfgGetForCLI(cfgPath) // keep your helper
 			if !arpAllIfaces && cfg.Interface != "" && arpIface == "" {
 				arpIface = cfg.Interface
 			}
 
-			entries, _, err := arp.ScanForCLI(cfg, cfg.LeaseDBPath, arpIface, arpAllIfaces, arpRefresh, time.Second*3)
+			entries, _, err := arp.ScanForCLI(cfg, reservations, cfg.LeaseDBPath, arpIface, arpAllIfaces, arpRefresh, time.Second*3)
 			if err != nil {
 				return err
 			}
@@ -1204,13 +1209,15 @@ func main() {
 
 func triggerARPScan(
 	cfgGet func() *config.Config,
+	reservationsGet func() config.Reservations,
 	db *dhcpserver.LeaseDB,
 	iface string,
 	logf, errf func(string, ...any),
 	_ bool, // allIfaces currently unused here; keep for future
 ) {
 	cfg := cfgGet()
-	entries, findings, err := arp.Scan(cfg, db, iface, false, time.Second*3)
+	reservations := reservationsGet()
+	entries, findings, err := arp.Scan(cfg, reservations, db, iface, false, time.Second*3)
 	if err != nil {
 		errf("ARP scan error: %v", err)
 		return
@@ -1361,10 +1368,10 @@ func triggerDHCPServerScan(
 	}
 }
 
-func cfgGetForCLI(cfgPath string) config.Config {
-	raw, _ := config.ParseStrict(cfgPath)
+func cfgGetForCLI(cfgPath string) (config.Config, config.Reservations) {
+	raw, reservations, _, _ := config.ParseStrict(cfgPath)
 	cfg, _, _ := config.ValidateAndNormalizeConfig(raw)
-	return cfg
+	return cfg, reservations
 }
 
 /* ----------------- Small helpers kept in main ----------------- */
@@ -1428,7 +1435,7 @@ func ensureDefaultConfig(cfgPath string) error {
 		"auto_reload":              true,
 		"pools":                    []map[string]string{{"start": "192.168.1.100", "end": "192.168.1.200"}},
 		"exclusions":               []string{"192.168.1.1", "192.168.1.2"},
-		"reservations":             map[string]any{},
+		"reservations_path":        "dhcplane.reservations",
 		"ntp":                      []string{},
 		"mtu":                      0,
 		"tftp_server_name":         "", // opt 66

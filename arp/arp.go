@@ -44,22 +44,22 @@ type Finding struct {
 }
 
 // Scan is the library version used by the server scheduler.
-func Scan(cfg *config.Config, db *dhcpserver.LeaseDB, iface string, allIfaces bool, timeout time.Duration) ([]Entry, []Finding, error) {
-	return gather(cfg, db, iface, allIfaces, timeout)
+func Scan(cfg *config.Config, reservations config.Reservations, db *dhcpserver.LeaseDB, iface string, allIfaces bool, timeout time.Duration) ([]Entry, []Finding, error) {
+	return gather(cfg, reservations, db, iface, allIfaces, timeout)
 }
 
 // ScanForCLI is the CLI helper. When refresh=true on non-Linux,
 // it pings targets to warm ARP cache before reading.
-func ScanForCLI(cfg config.Config, leasePath, iface string, allIfaces, refresh bool, timeout time.Duration) ([]Entry, []Finding, error) {
+func ScanForCLI(cfg config.Config, reservations config.Reservations, leasePath, iface string, allIfaces, refresh bool, timeout time.Duration) ([]Entry, []Finding, error) {
 	db := dhcpserver.NewLeaseDB(leasePath)
 	_ = db.Load()
 
 	// On macOS/Windows, optionally warm the ARP cache by pinging targets
 	if refresh && runtime.GOOS != "linux" {
-		targets := computeTargets(cfg)
+		targets := computeTargets(cfg, reservations)
 		pingWarmup(targets, timeout)
 	}
-	return gather(&cfg, db, iface, allIfaces, timeout)
+	return gather(&cfg, reservations, db, iface, allIfaces, timeout)
 }
 
 // PrintTable renders a plain table and legend to stdout.
@@ -90,8 +90,8 @@ func PrintTable(rows []Entry) {
 
 /* ----------------- Internal implementation ----------------- */
 
-func gather(cfg *config.Config, db *dhcpserver.LeaseDB, iface string, allIfaces bool, timeout time.Duration) ([]Entry, []Finding, error) {
-	snap, err := readARPPlatform(cfg, iface, allIfaces, timeout)
+func gather(cfg *config.Config, reservations config.Reservations, db *dhcpserver.LeaseDB, iface string, allIfaces bool, timeout time.Duration) ([]Entry, []Finding, error) {
+	snap, err := readARPPlatform(cfg, reservations, iface, allIfaces, timeout)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -106,7 +106,7 @@ func gather(cfg *config.Config, db *dhcpserver.LeaseDB, iface string, allIfaces 
 		}
 	}
 	resIP2MAC := map[string]string{}
-	for m, r := range cfg.Reservations {
+	for m, r := range reservations {
 		resIP2MAC[r.IP] = strings.ToLower(m)
 	}
 	banned := dhcpserver.ParseBannedMACsEnv()
@@ -220,14 +220,14 @@ func gather(cfg *config.Config, db *dhcpserver.LeaseDB, iface string, allIfaces 
 	return entries, findings, nil
 }
 
-func readARPPlatform(cfg *config.Config, iface string, allIfaces bool, timeout time.Duration) ([]Entry, error) {
+func readARPPlatform(cfg *config.Config, reservations config.Reservations, iface string, allIfaces bool, timeout time.Duration) ([]Entry, error) {
 	switch runtime.GOOS {
 	case "linux":
 		// Best-effort: if iface empty and not allIfaces, do nothing
 		if !allIfaces && strings.TrimSpace(iface) == "" {
 			return nil, fmt.Errorf("no interface specified")
 		}
-		targets := computeTargets(*cfg)
+		targets := computeTargets(*cfg, reservations)
 		entries := parseIPNeigh(iface, allIfaces)
 		scanned := scanLinuxSweep(iface, allIfaces, targets, timeout)
 		return mergeARP(entries, scanned), nil
@@ -237,7 +237,7 @@ func readARPPlatform(cfg *config.Config, iface string, allIfaces bool, timeout t
 	}
 }
 
-func computeTargets(cfg config.Config) []net.IP {
+func computeTargets(cfg config.Config, reservations config.Reservations) []net.IP {
 	_, subnet, err := net.ParseCIDR(cfg.SubnetCIDR)
 	if err != nil {
 		return nil
@@ -276,7 +276,7 @@ func computeTargets(cfg config.Config) []net.IP {
 			}
 		}
 	}
-	for _, r := range cfg.Reservations {
+	for _, r := range reservations {
 		ip := net.ParseIP(r.IP).To4()
 		if !skip(ip) {
 			out = append(out, append(net.IP(nil), ip...))
