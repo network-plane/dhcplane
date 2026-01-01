@@ -10,7 +10,7 @@ A fast, single-binary **DHCPv4 server** written in Go (built on `insomniacslk/dh
 - Classless static routes (121), optional mirror to 249, custom vendor option 43 payloads
 - Live config reload (watcher + `SIGHUP`)
 - Banned MAC handling (from config and/or env var)
-- Rich CLI: run server, view leases, stats, full subnet grid, config checking, config management (add/remove), and reload
+- Rich CLI: run server, view leases, stats, full subnet grid, config checking, config management (add/remove), search IPs, and reload
 - Clear logging (file and/or console), PID file, graceful shutdown
 - Background monitoring: ARP anomaly detection and rogue DHCP server detection
 - Console access via UNIX socket or TCP/IP for remote management
@@ -24,7 +24,7 @@ A fast, single-binary **DHCPv4 server** written in Go (built on `insomniacslk/dh
 - [Why root or CAP_NET_BIND_SERVICE?](#why-root-or-cap_net_bind_service)
 - [Configuration](#configuration)
   - [Full schema](#full-schema)
-  - [Example `config.json`](#example-configjson)
+  - [Example config](#example-config)
   - [Reservations format (with metadata)](#reservations-format-with-metadata)
   - [Banned MACs](#banned-macs)
   - [Per-device overrides](#per-device-overrides)
@@ -43,6 +43,7 @@ A fast, single-binary **DHCPv4 server** written in Go (built on `insomniacslk/dh
   - [`check`](#check)
   - [`reload`](#reload)
   - [`manage add/remove`](#manage-addremove)
+  - [`search`](#search)
 - [Flags](#flags)
 - [Environment variables](#environment-variables)
 - [Signals & lifecycle](#signals--lifecycle)
@@ -59,8 +60,8 @@ A fast, single-binary **DHCPv4 server** written in Go (built on `insomniacslk/dh
 go build -o dhcplane .
 
 # 2) Prepare config and empty lease DB
-cp config.example.json config.json
-echo '{"by_ip":{},"by_mac":{}}' > leases.json
+cp config.example.json dhcplane.config
+echo '{"by_ip":{},"by_mac":{}}' > dhcplane.leases
 
 # 3) Allow binding to UDP:67 without root (Linux)
 sudo setcap 'cap_net_bind_service=+ep' "$(pwd)/dhcplane"
@@ -115,7 +116,7 @@ The server loads a strict JSON file (unknown fields are rejected). On `serve` st
   "compact_on_load": false,
   "dns": ["1.1.1.1", "9.9.9.9"],
   "domain": "lan",
-  "lease_db_path": "leases.json",
+  "lease_db_path": "dhcplane.leases",
   "pid_file": "dhcplane.pid",
   "lease_seconds": 86400,
   "lease_sticky_seconds": 86400,
@@ -196,7 +197,7 @@ Defaults:
 - `lease_sticky_seconds`: `86400` (sticky window) if ≤ 0
 - At least one pool is required
 - Unknown fields are rejected (strict mode)
-- `lease_db_path`: defaults to `leases.json` when omitted
+- `lease_db_path`: defaults to `dhcplane.leases` when omitted
 - `pid_file`: defaults to `dhcplane.pid` when omitted
 - `reservations_path`: defaults to `dhcplane.reservations` when omitted (relative paths are resolved relative to config file directory)
 - `authoritative`: defaults to `true` when unset
@@ -212,13 +213,6 @@ Defaults:
 
 ### Example config
 
-- `lease_seconds`: `86400` (24h) if ≤ 0
-- `lease_sticky_seconds`: `86400` (sticky window) if ≤ 0
-- At least one pool is required
-- Unknown fields are rejected (strict mode)
-
-### Example `config.json`
-
 ```json
 {
   "interface": "",
@@ -226,6 +220,7 @@ Defaults:
   "subnet_cidr": "192.168.178.0/24",
   "gateway": "192.168.178.1",
   "dns": ["1.1.1.1","9.9.9.9"],
+  "lease_db_path": "dhcplane.leases",
   "lease_seconds": 86400,
   "lease_sticky_seconds": 86400,
   "auto_reload": true,
@@ -336,7 +331,7 @@ Provide a raw hex payload in many styles: `"01:04:de:ad:be:ef"`, `"01 04 de ad b
 
 ### Format
 
-`leases.json` is a simple map persisted by the server:
+`dhcplane.leases` (or the path specified in `lease_db_path`) is a simple map persisted by the server:
 
 ```json
 {
@@ -379,39 +374,45 @@ Serve with console echo and file log:
 
 ```bash
 ./dhcplane serve \
-  --config ./config.json \
+  --config ./dhcplane.config \
   --console
 ```
 
 Check the config:
 
 ```bash
-./dhcplane check -c ./config.json
+./dhcplane check -c ./dhcplane.config
 ```
 
 Live reload via PID file (default `dhcplane.pid`):
 
 ```bash
-./dhcplane reload -c ./config.json
+./dhcplane reload -c ./dhcplane.config
 ```
 
 List current leases (pretty JSON):
 
 ```bash
-./dhcplane leases -c ./config.json
+./dhcplane leases -c ./dhcplane.config
+```
+
+Search for an IP address:
+
+```bash
+./dhcplane search 192.168.178.100 -c ./dhcplane.config
 ```
 
 Stats & tables:
 
 ```bash
 # Summary + leased/expiring/expired tables
-./dhcplane stats -c ./config.json
+./dhcplane stats -c ./dhcplane.config
 
 # Full subnet table (hides free addresses) with Type column
-./dhcplane stats -c ./config.json --details
+./dhcplane stats -c ./dhcplane.config --details
 
 # colour grid of the whole subnet
-./dhcplane stats -c ./config.json --grid
+./dhcplane stats -c ./dhcplane.config --grid
 ```
 
 Add or update a reservation:
@@ -447,7 +448,7 @@ Key features at runtime:
 
 ### `leases`
 
-Print leases from `leases.json` as a JSON array with formatted timestamps (local time), including `AllocatedAt`, `Expiry`, and `FirstSeen`.
+Print leases from the lease database (default: `dhcplane.leases`) as a JSON array with formatted timestamps (local time), including `AllocatedAt`, `Expiry`, and `FirstSeen`.
 
 ### `stats`
 
@@ -465,7 +466,7 @@ Flags:
 
 ### `check`
 
-Strictly validate `config.json`. Unknown fields, wrong types, etc., return precise line/column.
+Strictly validate the config file (default: `dhcplane.config`). Unknown fields, wrong types, etc., return precise line/column.
 
 ### `reload`
 
@@ -473,7 +474,7 @@ Reads PID from `pid_file` in the config and sends `SIGHUP`. Before signaling, re
 
 ### `manage add/remove`
 
-Manipulate `reservations` in `config.json`:
+Manipulate reservations in the reservations file (default: `dhcplane.reservations`):
 
 - `manage add <mac> <ip> [note...]`
   - Validates MAC and IPv4
@@ -482,7 +483,18 @@ Manipulate `reservations` in `config.json`:
 - `manage remove <mac>`
   - Deletes the reservation if present
 
-Edits are written atomically via `config.json.tmp` → rename.
+Edits are written atomically via a temporary file → rename.
+
+### `search`
+
+Search for an IP address in reservations and leases:
+
+- `search <ip>`
+  - Displays all information about the IP address
+  - Shows reservation details (MAC, note, metadata) if found
+  - Shows lease details (MAC, hostname, timestamps, expiry status) if found
+  - Warns if MAC addresses don't match between reservation and lease
+  - Suggests running an ARP scan if the IP is not found in either reservations or leases
 
 ---
 
@@ -491,7 +503,7 @@ Edits are written atomically via `config.json.tmp` → rename.
 Global flags (apply to all commands unless noted):
 
 - `-c, --config string`
-  Path to JSON config (default `config.json`)
+  Path to JSON config (default `dhcplane.config`)
 - `--console`
   Serve the interactive console over UNIX socket (logs always print to stdout/stderr)
 
@@ -521,7 +533,7 @@ Command-specific flags:
 - `SIGINT`/`SIGTERM`
   Graceful shutdown: server stops, leases DB is saved, watcher/log files closed.
 
-When `auto_reload` is true, the process also watches the config file’s directory and applies changes shortly after writes (with validation and first-seen stamping for reservations/banned MACs where missing).
+When `auto_reload` is true, the process also watches the config file and reservations file directories and applies changes shortly after writes (with validation and first-seen stamping for reservations/banned MACs where missing).
 
 ---
 
@@ -535,13 +547,17 @@ Example log lines:
 
 ```log
 START iface="" bind=0.0.0.0:67 server_ip=192.168.178.1 subnet=192.168.178.0/24 gateway=192.168.178.1 lease=24h0m0s sticky=24h0m0s
-AUTO-RELOAD: watching ./config.json
+AUTO-RELOAD: watching ./dhcplane.config
 CONSOLE listening on UNIX socket + TCP 0.0.0.0:9090
 DETECT start mode=off interval=600s rate_limit=6/min iface=eth0 whitelist=0
+DETECT scan started iface=eth0
+DETECT scan completed iface=eth0 (no foreign servers found)
 DISCOVER from aa:bb:cc:dd:ee:ff hostname="printer" xid=0x12345678
 OFFER aa:bb:cc:dd:ee:ff -> 192.168.178.100
 ACK aa:bb:cc:dd:ee:ff <- 192.168.178.100 lease=24h0m0s (alloc=2025/09/05 20:40:01, exp=2025/09/06 20:40:01)
+DETECT scan started iface=eth0
 FOREIGN-DHCP-SERVER detected server_ip=192.168.178.254 from=192.168.178.254 iface=eth0
+DETECT scan completed iface=eth0 (found 1 server(s))
 ARP-ANOMALY ip=192.168.178.107 mac=d0:27:03:4f:22:60 iface=eth0 reason=unknown found=arp reserved=false leased=false excluded=false
 ```
 
@@ -571,8 +587,9 @@ Configuration:
 ### DHCP Server Detection
 
 Detects rogue/unauthorized DHCP servers on the network:
-- Sends periodic DHCP DISCOVER probes
+- Sends periodic DHCP DISCOVER probes (using MAC `00:00:00:00:00:00` which is silently ignored by the server)
 - Listens for OFFER responses from other servers
+- Logs when scans start and complete (even if no servers found)
 - Logs foreign DHCP servers not in the whitelist
 - Helps identify network conflicts
 
@@ -615,7 +632,7 @@ When `console_tcp_address` is set, the server listens on **both** UNIX socket an
 - Use `exclusions` to protect infrastructure IPs that are inside pools.
 - Banned MACs are enforced at request time; keep in mind MAC spoofing is possible on L2.
 - Consider running under a service account with only `cap_net_bind_service` capability if possible, not full root.
-- Always validate `config.json` with `check` before deploying edits in production.
+- Always validate the config file (default: `dhcplane.config`) with `check` before deploying edits in production.
 - If enabling TCP console access, consider firewall rules to restrict access to trusted networks.
 
 ---
