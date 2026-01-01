@@ -149,7 +149,8 @@ func gather(cfg *config.Config, reservations config.Reservations, db *dhcpserver
 			isExcluded = true
 		}
 
-		// Check if leased
+		// Check if leased (even if expired, we still know about it)
+		var leaseExpired bool
 		if l, ok := db.FindByIP(ip.String()); ok {
 			active := (l.Expiry > 0 && now <= l.Expiry) ||
 				(l.Expiry == 0 && l.AllocatedAt > 0 && now <= l.AllocatedAt+assume)
@@ -158,6 +159,10 @@ func gather(cfg *config.Config, reservations config.Reservations, db *dhcpserver
 				isLeased = true
 				leaseMAC = strings.ToLower(l.MAC)
 			} else {
+				// Lease exists but expired - still mark as leased for detection purposes
+				isLeased = true
+				leaseMAC = strings.ToLower(l.MAC)
+				leaseExpired = true
 				note = "expired-lease"
 			}
 		}
@@ -173,16 +178,31 @@ func gather(cfg *config.Config, reservations config.Reservations, db *dhcpserver
 					Found: "arp", Reserved: true, Leased: isLeased, Excluded: isExcluded,
 				})
 				note = "mismatch"
+			} else if !leaseExpired {
+				// Reserved and MAC matches, and lease not expired - no anomaly
+				// (If lease is expired but reserved MAC matches, that's also fine)
 			}
+			// If reserved and MAC matches, no anomaly - skip further checks
 		} else {
-			if state != "leased" {
+			// Not reserved - check for anomalies
+			if !isLeased {
+				// Not leased and not reserved = unknown device
 				findings = append(findings, Finding{
 					IP: ip.String(), MAC: rec.MAC, Iface: rec.Iface,
-					Reason: "unknown", LeaseMAC: leaseMAC, ResMAC: "",
+					Reason: "unknown", LeaseMAC: "", ResMAC: "",
 					Found: "arp", Reserved: false, Leased: false, Excluded: isExcluded,
 				})
 				note = "unknown"
 			} else if leaseMAC != "" && !macEqual(leaseMAC, rec.MAC) {
+				// Leased but MAC mismatch
+				findings = append(findings, Finding{
+					IP: ip.String(), MAC: rec.MAC, Iface: rec.Iface,
+					Reason: "mac-mismatch", LeaseMAC: leaseMAC, ResMAC: "",
+					Found: "arp", Reserved: false, Leased: true, Excluded: isExcluded,
+				})
+				note = "mismatch"
+			} else if leaseExpired && !macEqual(leaseMAC, rec.MAC) {
+				// Expired lease but MAC mismatch - still an anomaly
 				findings = append(findings, Finding{
 					IP: ip.String(), MAC: rec.MAC, Iface: rec.Iface,
 					Reason: "mac-mismatch", LeaseMAC: leaseMAC, ResMAC: "",
@@ -190,6 +210,7 @@ func gather(cfg *config.Config, reservations config.Reservations, db *dhcpserver
 				})
 				note = "mismatch"
 			}
+			// If leased and MAC matches, no anomaly
 		}
 
 		if nm, err := dhcpserver.CanonMAC(rec.MAC); err == nil {

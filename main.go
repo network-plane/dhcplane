@@ -283,10 +283,28 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 		return err
 	}
 	// Update leasePath if it was the default "leases.json" (migrated to "dhcplane.leases")
+	// Also check if the old path doesn't exist but the new one does
 	if leasePath == "leases.json" {
 		leasePath = "dhcplane.leases"
-		// Note: cfg.LeaseDBPath is not updated here to avoid modifying the config struct
-		// The actual file path is what matters for the database
+	} else {
+		// For custom paths, check if old .json version exists but new .leases doesn't
+		// This handles cases where config still references old path
+		leaseDir := filepath.Dir(leasePath)
+		if leaseDir == "." {
+			leaseDir, _ = os.Getwd()
+		}
+		leaseBase := filepath.Base(leasePath)
+		if strings.HasSuffix(leaseBase, ".json") && strings.Contains(leaseBase, "lease") {
+			oldPath := leasePath
+			newBase := strings.TrimSuffix(leaseBase, ".json") + ".leases"
+			newPath := filepath.Join(leaseDir, newBase)
+			if _, err := os.Stat(oldPath); os.IsNotExist(err) {
+				if _, err := os.Stat(newPath); err == nil {
+					// Old path doesn't exist but new one does - use new path
+					leasePath = newPath
+				}
+			}
+		}
 	}
 	
 	// Check reservations file migration
