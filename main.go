@@ -277,7 +277,21 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 		return fmt.Errorf("config validation: %w", verr)
 	}
 
+	// Migrate leases file if needed
 	leasePath := cfg.LeaseDBPath
+	if err := migrateLeasesFile(leasePath); err != nil {
+		return err
+	}
+	// Update leasePath if it was the default "leases.json" (migrated to "dhcplane.leases")
+	if leasePath == "leases.json" {
+		leasePath = "dhcplane.leases"
+		// Note: cfg.LeaseDBPath is not updated here to avoid modifying the config struct
+		// The actual file path is what matters for the database
+	}
+	
+	// Check reservations file migration
+	checkReservationsFileMigration(reservationsPath)
+	
 	db := dhcpserver.NewLeaseDB(leasePath)
 	if err := db.Load(); err != nil {
 		log.Printf("lease db load: %v (continuing with empty)", err)
@@ -837,6 +851,18 @@ func main() {
 		if err := migrateConfigFilename(cfgPath); err != nil {
 			return err
 		}
+		// Also check for config file conflicts (both old and new exist)
+		// This is handled in migrateConfigFilename, but we also want to check
+		// reservations file if config exists
+		if _, err := os.Stat(cfgPath); err == nil {
+			// Config exists, check for reservations file migration
+			cfgDir := filepath.Dir(cfgPath)
+			if cfgDir == "." {
+				cfgDir, _ = os.Getwd()
+			}
+			reservationsPath := filepath.Join(cfgDir, "dhcplane.reservations")
+			checkReservationsFileMigration(reservationsPath)
+		}
 		return nil
 	}
 
@@ -1385,63 +1411,130 @@ func cfgGetForCLI(cfgPath string) (config.Config, config.Reservations) {
 // migrateConfigFilename migrates old config filename (dhcplane.json) to new format (dhcplane.config).
 // If the requested config path doesn't exist but the old filename does in the same directory,
 // it attempts to rename it. If rename fails, exits with a red error message.
+// If both old and new files exist, shows a yellow warning.
 func migrateConfigFilename(cfgPath string) error {
-	// Check if requested file exists
-	if _, err := os.Stat(cfgPath); err == nil {
-		// File exists, no migration needed
-		return nil
-	}
-	
-	// File doesn't exist, check for old .json version
 	cfgDir := filepath.Dir(cfgPath)
 	cfgBase := filepath.Base(cfgPath)
 	
-	// Handle default filenames
+	if cfgDir == "." {
+		cfgDir, _ = os.Getwd()
+	}
+	
+	// Determine old and new paths
+	var oldPath, newPath string
 	if cfgBase == "dhcplane.config" || cfgBase == "dhcplane.json" {
-		if cfgDir == "." {
-			cfgDir, _ = os.Getwd()
-		}
-		oldPath := filepath.Join(cfgDir, "dhcplane.json")
-		newPath := filepath.Join(cfgDir, "dhcplane.config")
-		
-		if _, err := os.Stat(oldPath); err == nil {
-			// Old file exists, try to rename it
-			if err := os.Rename(oldPath, newPath); err != nil {
-				fmt.Fprintln(os.Stderr, aurora.Red(fmt.Sprintf("ERROR: Failed to migrate config file from %s to %s: %v", oldPath, newPath, err)))
-				fmt.Fprintln(os.Stderr, aurora.Red("Please manually rename the file or fix the permissions and try again."))
-				os.Exit(1)
-			}
-			// Update cfgPath if it was the old name
-			if cfgBase == "dhcplane.json" {
-				cfgPath = newPath
-			}
-		}
+		oldPath = filepath.Join(cfgDir, "dhcplane.json")
+		newPath = filepath.Join(cfgDir, "dhcplane.config")
 	} else if strings.HasSuffix(cfgBase, ".config") {
-		// For custom paths ending in .config, check for .json version
 		oldBase := strings.TrimSuffix(cfgBase, ".config") + ".json"
-		oldPath := filepath.Join(cfgDir, oldBase)
-		if _, err := os.Stat(oldPath); err == nil {
-			// Old file exists, try to rename it
-			if err := os.Rename(oldPath, cfgPath); err != nil {
-				fmt.Fprintln(os.Stderr, aurora.Red(fmt.Sprintf("ERROR: Failed to migrate config file from %s to %s: %v", oldPath, cfgPath, err)))
-				fmt.Fprintln(os.Stderr, aurora.Red("Please manually rename the file or fix the permissions and try again."))
-				os.Exit(1)
-			}
-		}
+		oldPath = filepath.Join(cfgDir, oldBase)
+		newPath = cfgPath
 	} else if strings.HasSuffix(cfgBase, ".json") {
-		// User explicitly specified .json file, try to migrate it
 		newBase := strings.TrimSuffix(cfgBase, ".json") + ".config"
-		newPath := filepath.Join(cfgDir, newBase)
-		if _, err := os.Stat(cfgPath); err == nil {
-			// Old file exists, try to rename it
-			if err := os.Rename(cfgPath, newPath); err != nil {
-				fmt.Fprintln(os.Stderr, aurora.Red(fmt.Sprintf("ERROR: Failed to migrate config file from %s to %s: %v", cfgPath, newPath, err)))
-				fmt.Fprintln(os.Stderr, aurora.Red("Please manually rename the file or fix the permissions and try again."))
-				os.Exit(1)
-			}
+		oldPath = cfgPath
+		newPath = filepath.Join(cfgDir, newBase)
+	} else {
+		return nil // Not a config file pattern
+	}
+	
+	oldExists := false
+	newExists := false
+	if _, err := os.Stat(oldPath); err == nil {
+		oldExists = true
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		newExists = true
+	}
+	
+	if oldExists && newExists {
+		// Both exist, warn in yellow
+		fmt.Fprintln(os.Stderr, aurora.Yellow(fmt.Sprintf("WARNING: Both old config file (%s) and new config file (%s) exist. Using new file.", oldPath, newPath)))
+		return nil
+	}
+	
+	if oldExists && !newExists {
+		// Old exists, new doesn't - migrate
+		if err := os.Rename(oldPath, newPath); err != nil {
+			fmt.Fprintln(os.Stderr, aurora.Red(fmt.Sprintf("ERROR: Failed to migrate config file from %s to %s: %v", oldPath, newPath, err)))
+			fmt.Fprintln(os.Stderr, aurora.Red("Please manually rename the file or fix the permissions and try again."))
+			os.Exit(1)
 		}
 	}
+	
 	return nil
+}
+
+// migrateLeasesFile migrates old leases filename (leases.json) to new format (dhcplane.leases).
+// If both old and new files exist, shows a yellow warning.
+func migrateLeasesFile(leasePath string) error {
+	leaseDir := filepath.Dir(leasePath)
+	leaseBase := filepath.Base(leasePath)
+	
+	if leaseDir == "." {
+		leaseDir, _ = os.Getwd()
+	}
+	
+	// Determine old and new paths
+	var oldPath, newPath string
+	if leaseBase == "dhcplane.leases" || leaseBase == "leases.json" {
+		oldPath = filepath.Join(leaseDir, "leases.json")
+		newPath = filepath.Join(leaseDir, "dhcplane.leases")
+	} else {
+		return nil // Custom path, no migration
+	}
+	
+	oldExists := false
+	newExists := false
+	if _, err := os.Stat(oldPath); err == nil {
+		oldExists = true
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		newExists = true
+	}
+	
+	if oldExists && newExists {
+		// Both exist, warn in yellow
+		fmt.Fprintln(os.Stderr, aurora.Yellow(fmt.Sprintf("WARNING: Both old leases file (%s) and new leases file (%s) exist. Using new file.", oldPath, newPath)))
+		return nil
+	}
+	
+	if oldExists && !newExists {
+		// Old exists, new doesn't - migrate
+		if err := os.Rename(oldPath, newPath); err != nil {
+			fmt.Fprintln(os.Stderr, aurora.Red(fmt.Sprintf("ERROR: Failed to migrate leases file from %s to %s: %v", oldPath, newPath, err)))
+			fmt.Fprintln(os.Stderr, aurora.Red("Please manually rename the file or fix the permissions and try again."))
+			os.Exit(1)
+		}
+	}
+	
+	return nil
+}
+
+// checkReservationsFileMigration checks for old reservations file format and warns if both exist.
+func checkReservationsFileMigration(reservationsPath string) {
+	reservationsDir := filepath.Dir(reservationsPath)
+	
+	if reservationsDir == "." {
+		reservationsDir, _ = os.Getwd()
+	}
+	
+	// Check for old format - reservations.json (if someone manually created it)
+	oldPath := filepath.Join(reservationsDir, "reservations.json")
+	newPath := reservationsPath
+	
+	oldExists := false
+	newExists := false
+	if _, err := os.Stat(oldPath); err == nil {
+		oldExists = true
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		newExists = true
+	}
+	
+	if oldExists && newExists {
+		// Both exist, warn in yellow
+		fmt.Fprintln(os.Stderr, aurora.Yellow(fmt.Sprintf("WARNING: Both old reservations file (%s) and new reservations file (%s) exist. Using new file.", oldPath, newPath)))
+	}
 }
 
 func errf(format string, a ...any) error {
@@ -1495,7 +1588,7 @@ func ensureDefaultConfig(cfgPath string) error {
 		"compact_on_load":          false,
 		"dns":                      []string{"192.168.1.1", "1.1.1.1"},
 		"domain":                   "lan",
-		"lease_db_path":            "leases.json",
+		"lease_db_path":            "dhcplane.leases",
 		"pid_file":                 "dhcplane.pid",
 		"authoritative":            true, // default authoritative if unset
 		"lease_seconds":            86400, // 24h

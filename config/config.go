@@ -547,7 +547,7 @@ func ValidateAndNormalizeConfig(cfg Config) (Config, []string, error) {
 	// Logging defaults and validation
 	c.LeaseDBPath = strings.TrimSpace(c.LeaseDBPath)
 	if c.LeaseDBPath == "" {
-		c.LeaseDBPath = "leases.json"
+		c.LeaseDBPath = "dhcplane.leases"
 	}
 	c.PIDFile = strings.TrimSpace(c.PIDFile)
 	if c.PIDFile == "" {
