@@ -12,6 +12,8 @@ A fast, single-binary **DHCPv4 server** written in Go (built on `insomniacslk/dh
 - Banned MAC handling (from config and/or env var)
 - Rich CLI: run server, view leases, stats, full subnet grid, config checking, config management (add/remove), and reload
 - Clear logging (file and/or console), PID file, graceful shutdown
+- Background monitoring: ARP anomaly detection and rogue DHCP server detection
+- Console access via UNIX socket or TCP/IP for remote management
 
 ---
 
@@ -67,7 +69,7 @@ sudo setcap 'cap_net_bind_service=+ep' "$(pwd)/dhcplane"
 ./dhcplane serve --console
 ```
 
-> Tip: add `--console` to expose the interactive console socket while still seeing logs on stdout/stderr.
+> Tip: add `--console` to expose the interactive console socket (or TCP if `console_tcp_address` is configured) while still seeing logs on stdout/stderr.
 
 ---
 
@@ -168,11 +170,37 @@ The server loads a strict JSON file (unknown fields are rejected). On `serve` st
   },
 
   "equipment_types": ["Switch","Router","AP","Modem","Gateway","Printer"],
-  "management_types": ["ssh","web","telnet","serial","console"]
+  "management_types": ["ssh","web","telnet","serial","console"],
+
+  "console_max_lines": 10000,
+  "console_tcp_address": "",
+
+  "logging": {
+    "path": "",
+    "filename": "dhcplane.log",
+    "max_size": 20,
+    "max_backups": 5,
+    "max_age": 0,
+    "compress": true
+  },
+
+  "detect_dhcp_servers": {
+    "enabled": true,
+    "active_probe": "off",
+    "probe_interval": 600,
+    "first_scan": 60,
+    "rate_limit": 6,
+    "whitelist_servers": []
+  },
+
+  "arp_anomaly_detection": {
+    "enabled": false,
+    "probe_interval": 1800,
+    "first_scan": 60
+  }
 }
 ```
 
-Defaults:
 Defaults:
 
 - `lease_seconds`: `86400` (24h) if ≤ 0
@@ -181,6 +209,16 @@ Defaults:
 - Unknown fields are rejected (strict mode)
 - `lease_db_path`: defaults to `leases.json` when omitted
 - `pid_file`: defaults to `dhcplane.pid` when omitted
+- `authoritative`: defaults to `true` when unset
+- `equipment_types`: defaults to `["Switch","Router","AP","Modem","Gateway"]` when empty
+- `management_types`: defaults to `["ssh","web","telnet","serial","console"]` when empty
+- `console_max_lines`: defaults to `10000` when ≤ 0
+- `detect_dhcp_servers.enabled`: defaults to `true` if other detection fields are set
+- `detect_dhcp_servers.probe_interval`: defaults to `600` seconds (minimum 60)
+- `detect_dhcp_servers.first_scan`: defaults to `60` seconds (minimum 10)
+- `detect_dhcp_servers.rate_limit`: defaults to `6` events per minute
+- `arp_anomaly_detection.probe_interval`: defaults to `1800` seconds
+- `arp_anomaly_detection.first_scan`: defaults to `60` seconds
 
 ### Example config
 
@@ -220,7 +258,32 @@ Defaults:
   "mirror_routes_to_249": false,
   "vendor_specific_43_hex": "",
   "device_overrides": {},
-  "banned_macs": {}
+  "banned_macs": {},
+  "equipment_types": ["Switch","Router","AP","Modem","Gateway"],
+  "management_types": ["ssh","web","telnet","serial","console"],
+  "console_max_lines": 10000,
+  "console_tcp_address": "",
+  "logging": {
+    "path": "",
+    "filename": "dhcplane.log",
+    "max_size": 20,
+    "max_backups": 5,
+    "max_age": 0,
+    "compress": true
+  },
+  "detect_dhcp_servers": {
+    "enabled": true,
+    "active_probe": "off",
+    "probe_interval": 600,
+    "first_scan": 60,
+    "rate_limit": 6,
+    "whitelist_servers": []
+  },
+  "arp_anomaly_detection": {
+    "enabled": false,
+    "probe_interval": 1800,
+    "first_scan": 60
+  }
 }
 ```
 
@@ -445,6 +508,7 @@ Command-specific flags:
 - `stats --details`
 - `stats --grid`
 - `console attach --transparent`
+- `console attach --tcp <address>` (e.g., `--tcp localhost:9090`)
 
 ---
 
@@ -480,12 +544,78 @@ Example log lines:
 ```log
 START iface="" bind=0.0.0.0:67 server_ip=192.168.178.1 subnet=192.168.178.0/24 gateway=192.168.178.1 lease=24h0m0s sticky=24h0m0s
 AUTO-RELOAD: watching ./config.json
+CONSOLE listening on UNIX socket + TCP 0.0.0.0:9090
+DETECT start mode=off interval=600s rate_limit=6/min iface=eth0 whitelist=0
 DISCOVER from aa:bb:cc:dd:ee:ff hostname="printer" xid=0x12345678
 OFFER aa:bb:cc:dd:ee:ff -> 192.168.178.100
 ACK aa:bb:cc:dd:ee:ff <- 192.168.178.100 lease=24h0m0s (alloc=2025/09/05 20:40:01, exp=2025/09/06 20:40:01)
+FOREIGN-DHCP-SERVER detected server_ip=192.168.178.254 from=192.168.178.254 iface=eth0
+ARP-ANOMALY ip=192.168.178.107 mac=d0:27:03:4f:22:60 iface=eth0 reason=unknown found=arp reserved=false leased=false excluded=false
 ```
 
 ---
+
+## Background monitoring
+
+The server includes two optional background monitoring tasks:
+
+### ARP Anomaly Detection
+
+Detects devices on the network that aren't managed by the DHCP server:
+- Scans ARP tables periodically
+- Identifies devices with IPs that aren't leased or reserved
+- Detects MAC address mismatches
+- Reports banned MACs found in ARP
+
+Configuration:
+```json
+"arp_anomaly_detection": {
+  "enabled": false,
+  "probe_interval": 1800,
+  "first_scan": 60
+}
+```
+
+### DHCP Server Detection
+
+Detects rogue/unauthorized DHCP servers on the network:
+- Sends periodic DHCP DISCOVER probes
+- Listens for OFFER responses from other servers
+- Logs foreign DHCP servers not in the whitelist
+- Helps identify network conflicts
+
+Configuration:
+```json
+"detect_dhcp_servers": {
+  "enabled": true,
+  "active_probe": "off",
+  "probe_interval": 600,
+  "first_scan": 60,
+  "rate_limit": 6,
+  "whitelist_servers": []
+}
+```
+
+Both tasks run independently in background goroutines and can be enabled/disabled via config.
+
+## Console access
+
+The interactive console can be accessed via:
+
+- **UNIX socket** (default): Local access via socket file
+  ```bash
+  ./dhcplane console attach
+  ```
+
+- **TCP/IP** (when configured): Remote access over network
+  ```json
+  "console_tcp_address": "0.0.0.0:9090"
+  ```
+  ```bash
+  ./dhcplane console attach --tcp 192.168.1.2:9090
+  ```
+
+When `console_tcp_address` is set, the server listens on **both** UNIX socket and TCP simultaneously, allowing both local and remote access.
 
 ## Security notes
 
@@ -494,6 +624,7 @@ ACK aa:bb:cc:dd:ee:ff <- 192.168.178.100 lease=24h0m0s (alloc=2025/09/05 20:40:0
 - Banned MACs are enforced at request time; keep in mind MAC spoofing is possible on L2.
 - Consider running under a service account with only `cap_net_bind_service` capability if possible, not full root.
 - Always validate `config.json` with `check` before deploying edits in production.
+- If enabling TCP console access, consider firewall rules to restrict access to trusted networks.
 
 ---
 

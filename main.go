@@ -1423,25 +1423,26 @@ func ensureDefaultConfig(cfgPath string) error {
 		"lease_db_path":            "leases.json",
 		"pid_file":                 "dhcplane.pid",
 		"authoritative":            true, // default authoritative if unset
-		"lease_seconds":            3600,
-		"lease_sticky_seconds":     3600,
+		"lease_seconds":            86400, // 24h
+		"lease_sticky_seconds":     86400, // default sticky window
 		"auto_reload":              true,
 		"pools":                    []map[string]string{{"start": "192.168.1.100", "end": "192.168.1.200"}},
 		"exclusions":               []string{"192.168.1.1", "192.168.1.2"},
 		"reservations":             map[string]any{},
 		"ntp":                      []string{},
 		"mtu":                      0,
-		"tftp_server_name":         "",
-		"bootfile_name":            "",
+		"tftp_server_name":         "", // opt 66
+		"bootfile_name":            "", // opt 67
 		"wpad_url":                 "",
 		"wins":                     []string{},
 		"domain_search":            []string{},
 		"static_routes":            []map[string]string{},
 		"mirror_routes_to_249":     false,
-		"vendor_specific_43_hex":   "",
+		"vendor_specific_43_hex":   "", // opt 43 (hex payload)
 		"device_overrides":         map[string]any{},
 		"vendor_class_overrides":   map[string]any{}, // Vendor Class overrides (by option 60 string)
 		"user_class_overrides_77":  map[string]any{},
+		"hostname_12":              "", // suggest hostname (opt 12) when client does not supply one
 		"enable_broadcast_28":      false,
 		"use_classful_routes_33":   false,
 		"routes_33":                []map[string]string{}, // {"destination":"a.b.c.0","gateway":"x.y.z.w"}
@@ -1451,8 +1452,8 @@ func ensureDefaultConfig(cfgPath string) error {
 		"tftp_servers_150":         []string{}, // list of IPv4s
 		"echo_relay_agent_info_82": false,
 		"banned_macs":              map[string]any{},
-		"equipment_types":          []string{},
-		"management_types":         []string{},
+		"equipment_types":          []string{"Switch", "Router", "AP", "Modem", "Gateway"},
+		"management_types":         []string{"ssh", "web", "telnet", "serial", "console"},
 		"console_max_lines":        10000,
 		"console_tcp_address":      "", // empty = UNIX socket; e.g., "0.0.0.0:9090" for TCP
 		"logging": map[string]any{
@@ -1463,7 +1464,6 @@ func ensureDefaultConfig(cfgPath string) error {
 			"max_age":     0,    // days; 0 = no age-based purge
 			"compress":    true, // gzip (lumberjack)
 		},
-		// New: default detection block
 		"detect_dhcp_servers": map[string]any{
 			"enabled":           true,
 			"active_probe":      "off",   // off|safe|aggressive
@@ -1471,6 +1471,11 @@ func ensureDefaultConfig(cfgPath string) error {
 			"first_scan":        60,      // seconds, default 60
 			"rate_limit":        6,       // events per minute per server
 			"whitelist_servers": []any{}, // IPv4 or MAC entries
+		},
+		"arp_anomaly_detection": map[string]any{
+			"enabled":        false,
+			"probe_interval": 1800, // seconds, default 1800
+			"first_scan":     60,   // seconds, default 60
 		},
 	}
 
