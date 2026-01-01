@@ -396,6 +396,15 @@ func (s *Server) Handler(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCPv4)
 		mac = strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(dispMAC), "-", ":"), " ", ""))
 	}
 
+	// Reject invalid/zero MAC addresses (e.g., from DHCP server detection probes)
+	// Note: Our own DHCP server detection uses 00:00:00:00:00:00, but we should ignore it here
+	// to avoid processing our own probe as a legitimate request
+	if mac == "00:00:00:00:00:00" || mac == "" {
+		// Silently ignore - this is likely from our own DHCP server detection probe
+		// or a malformed client request
+		return
+	}
+
 	hostname := strings.TrimRight(string(req.Options.Get(dhcpv4.OptionHostName)), "\x00")
 
 	// banned set = env + cfg

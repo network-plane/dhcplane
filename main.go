@@ -1491,6 +1491,8 @@ func triggerDHCPServerScan(
 		return
 	}
 
+	logf("DETECT scan started iface=%s", iface)
+
 	// Listen for OFFER responses
 	seenServers := make(map[string]bool)
 	deadline := time.Now().Add(2 * time.Second)
@@ -1539,6 +1541,13 @@ func triggerDHCPServerScan(
 			peerIP = peerAddr.IP.String()
 		}
 		logf("FOREIGN-DHCP-SERVER detected server_ip=%s from=%s iface=%s", serverID, peerIP, iface)
+	}
+
+	// Log completion
+	if len(seenServers) == 0 {
+		logf("DETECT scan completed iface=%s (no foreign servers found)", iface)
+	} else {
+		logf("DETECT scan completed iface=%s (found %d server(s))", iface, len(seenServers))
 	}
 }
 
