@@ -821,18 +821,24 @@ func main() {
 	root := &cobra.Command{
 		Use:   "dhcplane",
 		Short: "DHCPv4 server (insomniacslk/dhcp) with JSON config, reservations (with notes), logging, sticky leases, stats, and live reload",
-		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
-			if showVersion {
-				fmt.Println(appVersion)
-				os.Exit(0)
-			}
-			return nil
-		},
 	}
 	root.PersistentFlags().BoolVarP(&showVersion, "version", "", false, "Print version and exit")
-	root.PersistentFlags().StringVarP(&cfgPath, "config", "", "dhcplane.json", "Path to JSON config")
+	root.PersistentFlags().StringVarP(&cfgPath, "config", "", "dhcplane.config", "Path to config file")
 	// authoritative is now config-driven; flag removed
 	root.PersistentFlags().BoolVar(&console, "console", false, "Export console over UNIX socket (or TCP if console_tcp_address is set) in addition to stdout/stderr logging")
+	
+	// Migrate old config filename if needed
+	root.PersistentPreRunE = func(_ *cobra.Command, _ []string) error {
+		if showVersion {
+			fmt.Println(appVersion)
+			os.Exit(0)
+		}
+		// Migrate old config filename before any command runs
+		if err := migrateConfigFilename(cfgPath); err != nil {
+			return err
+		}
+		return nil
+	}
 
 	// Inject the client-side attach command into this binary.
 	addConsoleCommands(root)
@@ -1375,6 +1381,68 @@ func cfgGetForCLI(cfgPath string) (config.Config, config.Reservations) {
 }
 
 /* ----------------- Small helpers kept in main ----------------- */
+
+// migrateConfigFilename migrates old config filename (dhcplane.json) to new format (dhcplane.config).
+// If the requested config path doesn't exist but the old filename does in the same directory,
+// it attempts to rename it. If rename fails, exits with a red error message.
+func migrateConfigFilename(cfgPath string) error {
+	// Check if requested file exists
+	if _, err := os.Stat(cfgPath); err == nil {
+		// File exists, no migration needed
+		return nil
+	}
+	
+	// File doesn't exist, check for old .json version
+	cfgDir := filepath.Dir(cfgPath)
+	cfgBase := filepath.Base(cfgPath)
+	
+	// Handle default filenames
+	if cfgBase == "dhcplane.config" || cfgBase == "dhcplane.json" {
+		if cfgDir == "." {
+			cfgDir, _ = os.Getwd()
+		}
+		oldPath := filepath.Join(cfgDir, "dhcplane.json")
+		newPath := filepath.Join(cfgDir, "dhcplane.config")
+		
+		if _, err := os.Stat(oldPath); err == nil {
+			// Old file exists, try to rename it
+			if err := os.Rename(oldPath, newPath); err != nil {
+				fmt.Fprintln(os.Stderr, aurora.Red(fmt.Sprintf("ERROR: Failed to migrate config file from %s to %s: %v", oldPath, newPath, err)))
+				fmt.Fprintln(os.Stderr, aurora.Red("Please manually rename the file or fix the permissions and try again."))
+				os.Exit(1)
+			}
+			// Update cfgPath if it was the old name
+			if cfgBase == "dhcplane.json" {
+				cfgPath = newPath
+			}
+		}
+	} else if strings.HasSuffix(cfgBase, ".config") {
+		// For custom paths ending in .config, check for .json version
+		oldBase := strings.TrimSuffix(cfgBase, ".config") + ".json"
+		oldPath := filepath.Join(cfgDir, oldBase)
+		if _, err := os.Stat(oldPath); err == nil {
+			// Old file exists, try to rename it
+			if err := os.Rename(oldPath, cfgPath); err != nil {
+				fmt.Fprintln(os.Stderr, aurora.Red(fmt.Sprintf("ERROR: Failed to migrate config file from %s to %s: %v", oldPath, cfgPath, err)))
+				fmt.Fprintln(os.Stderr, aurora.Red("Please manually rename the file or fix the permissions and try again."))
+				os.Exit(1)
+			}
+		}
+	} else if strings.HasSuffix(cfgBase, ".json") {
+		// User explicitly specified .json file, try to migrate it
+		newBase := strings.TrimSuffix(cfgBase, ".json") + ".config"
+		newPath := filepath.Join(cfgDir, newBase)
+		if _, err := os.Stat(cfgPath); err == nil {
+			// Old file exists, try to rename it
+			if err := os.Rename(cfgPath, newPath); err != nil {
+				fmt.Fprintln(os.Stderr, aurora.Red(fmt.Sprintf("ERROR: Failed to migrate config file from %s to %s: %v", cfgPath, newPath, err)))
+				fmt.Fprintln(os.Stderr, aurora.Red("Please manually rename the file or fix the permissions and try again."))
+				os.Exit(1)
+			}
+		}
+	}
+	return nil
+}
 
 func errf(format string, a ...any) error {
 	msg := fmt.Sprintf(format, a...)
