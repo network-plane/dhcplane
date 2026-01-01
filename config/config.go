@@ -175,6 +175,7 @@ type DHCPServerDetectionConfig struct {
 	Enabled          bool     `json:"enabled,omitempty"`
 	ActiveProbe      string   `json:"active_probe,omitempty"`
 	ProbeInterval    int      `json:"probe_interval,omitempty"`
+	FirstScan        int      `json:"first_scan,omitempty"`     // seconds, default 60
 	WhitelistServers []string `json:"whitelist_servers,omitempty"`
 	RateLimit        int      `json:"rate_limit,omitempty"`
 }
@@ -511,6 +512,14 @@ func ValidateAndNormalizeConfig(cfg Config) (Config, []string, error) {
 		if d.ProbeInterval < 60 {
 			warns = append(warns, "warning: detect_dhcp_servers.probe_interval clamped to 60s minimum")
 			d.ProbeInterval = 60
+		}
+
+		if d.FirstScan <= 0 {
+			d.FirstScan = 60
+		}
+		if d.FirstScan < 10 {
+			warns = append(warns, "warning: detect_dhcp_servers.first_scan clamped to 10s minimum")
+			d.FirstScan = 10
 		}
 
 		if d.RateLimit <= 0 {

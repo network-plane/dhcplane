@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/logrusorgru/aurora"
 	planeconsole "github.com/network-plane/planeconsole"
 	"github.com/spf13/cobra"
@@ -51,7 +52,7 @@ func buildConsoleConfig(maxLines int) planeconsole.Config {
 			{Match: "RELEASE", CaseSensitive: true, Style: &planeconsole.Style{FG: "yellow", Attrs: "b"}},
 			{Match: "DECLINE", CaseSensitive: true, Style: &planeconsole.Style{FG: "yellow", Attrs: "b"}},
 			{Match: "DETECT", CaseSensitive: true, Style: &planeconsole.Style{FG: "green", Attrs: "b"}},
-			{Match: "FOREIGN-DHCP", CaseSensitive: true, Style: &planeconsole.Style{FG: "red", Attrs: "b"}},
+			{Match: "FOREIGN-DHCP-SERVER", CaseSensitive: true, Style: &planeconsole.Style{FG: "red", Attrs: "b"}},
 			{Match: "ARP-ANOMALY", CaseSensitive: true, Style: &planeconsole.Style{FG: "red", Attrs: "b"}},
 		},
 	}
@@ -439,6 +440,35 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 			}
 		}()
 		defer close(stopARP)
+	}
+
+	// Background task scheduler - DHCP server detection
+	if cfg.DetectDHCPServers.Enabled {
+		first := time.Duration(cfg.DetectDHCPServers.FirstScan) * time.Second
+		ival := time.Duration(cfg.DetectDHCPServers.ProbeInterval) * time.Second
+
+		stopDHCP := make(chan struct{})
+		go func() {
+			timer := time.NewTimer(first)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				triggerDHCPServerScan(cfgGet, currentIface, logSink, errorSink)
+			case <-stopDHCP:
+				return
+			}
+			tk := time.NewTicker(ival)
+			defer tk.Stop()
+			for {
+				select {
+				case <-tk.C:
+					triggerDHCPServerScan(cfgGet, currentIface, logSink, errorSink)
+				case <-stopDHCP:
+					return
+				}
+			}
+		}()
+		defer close(stopDHCP)
 	}
 
 	// Optional auto-reload watcher
@@ -1200,6 +1230,137 @@ func triggerARPScan(
 	}
 }
 
+// triggerDHCPServerScan detects rogue DHCP servers by sending a DISCOVER and listening for responses.
+func triggerDHCPServerScan(
+	cfgGet func() *config.Config,
+	iface string,
+	logf, errf func(string, ...any),
+) {
+	cfg := cfgGet()
+	if !cfg.DetectDHCPServers.Enabled {
+		return
+	}
+
+	serverIP := net.ParseIP(cfg.ServerIP).To4()
+	if serverIP == nil {
+		errf("DHCP server detection: invalid server_ip %s", cfg.ServerIP)
+		return
+	}
+
+	// Build whitelist set
+	whitelist := make(map[string]bool)
+	whitelist[serverIP.String()] = true // Our own server is always whitelisted
+	for _, w := range cfg.DetectDHCPServers.WhitelistServers {
+		whitelist[w] = true
+	}
+
+	// Create a temporary MAC for the probe
+	probeMAC, err := net.ParseMAC("00:00:00:00:00:00")
+	if err != nil {
+		errf("DHCP server detection: failed to create probe MAC: %v", err)
+		return
+	}
+
+	// Create DISCOVER packet
+	discover, err := dhcpv4.NewDiscovery(probeMAC)
+	if err != nil {
+		errf("DHCP server detection: failed to create DISCOVER: %v", err)
+		return
+	}
+	discover.SetBroadcast()
+
+	// Set up listener on a separate socket to catch responses
+	conn, err := net.ListenPacket("udp4", ":68")
+	if err != nil {
+		errf("DHCP server detection: failed to listen on UDP 68: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	// Set read deadline
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	// Send DISCOVER
+	var destAddr *net.UDPAddr
+	if iface != "" {
+		// Try to get broadcast address for the interface
+		ifi, err := net.InterfaceByName(iface)
+		if err == nil {
+			addrs, _ := ifi.Addrs()
+			for _, addr := range addrs {
+				if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+					ip := ipnet.IP.To4()
+					mask := ipnet.Mask
+					broadcast := make(net.IP, 4)
+					for i := 0; i < 4; i++ {
+						broadcast[i] = ip[i] | ^mask[i]
+					}
+					destAddr = &net.UDPAddr{IP: broadcast, Port: 67}
+					break
+				}
+			}
+		}
+	}
+	if destAddr == nil {
+		destAddr = &net.UDPAddr{IP: net.IPv4bcast, Port: 67}
+	}
+
+	if _, err := conn.WriteTo(discover.ToBytes(), destAddr); err != nil {
+		errf("DHCP server detection: failed to send DISCOVER: %v", err)
+		return
+	}
+
+	// Listen for OFFER responses
+	seenServers := make(map[string]bool)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		buf := make([]byte, 1500)
+		n, peer, err := conn.ReadFrom(buf)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			break
+		}
+
+		resp, err := dhcpv4.FromBytes(buf[:n])
+		if err != nil {
+			continue
+		}
+
+		// Only process OFFER messages
+		if resp.MessageType() != dhcpv4.MessageTypeOffer {
+			continue
+		}
+
+		// Get server identifier
+		serverIDOpt := resp.Options.Get(dhcpv4.OptionServerIdentifier)
+		if len(serverIDOpt) != 4 {
+			continue
+		}
+		serverID := net.IP(serverIDOpt).To4().String()
+
+		// Skip if already seen or whitelisted
+		if seenServers[serverID] || whitelist[serverID] {
+			continue
+		}
+		seenServers[serverID] = true
+
+		// Check if it's our server
+		if serverID == serverIP.String() {
+			continue
+		}
+
+		// Log foreign DHCP server
+		peerIP := "unknown"
+		if peerAddr, ok := peer.(*net.UDPAddr); ok {
+			peerIP = peerAddr.IP.String()
+		}
+		logf("FOREIGN-DHCP-SERVER detected server_ip=%s from=%s iface=%s", serverID, peerIP, iface)
+	}
+}
+
 func cfgGetForCLI(cfgPath string) config.Config {
 	raw, _ := config.ParseStrict(cfgPath)
 	cfg, _, _ := config.ValidateAndNormalizeConfig(raw)
@@ -1307,6 +1468,7 @@ func ensureDefaultConfig(cfgPath string) error {
 			"enabled":           true,
 			"active_probe":      "off",   // off|safe|aggressive
 			"probe_interval":    600,     // seconds
+			"first_scan":        60,      // seconds, default 60
 			"rate_limit":        6,       // events per minute per server
 			"whitelist_servers": []any{}, // IPv4 or MAC entries
 		},
