@@ -1251,7 +1251,131 @@ func main() {
 	arpCmd.Flags().BoolVar(&arpRefresh, "refresh", false, "Best-effort cache warm-up on macOS/Windows")
 	arpCmd.Flags().StringVar(&arpIface, "iface", "", "Interface name override")
 
-	root.AddCommand(serveCmd, showCmd, statsCmd, checkCmd, reloadCmd, manageCmd, arpCmd)
+	searchCmd := &cobra.Command{
+		Use:   "search <ip>",
+		Short: "Search for an IP address in reservations and leases",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			ipStr := args[0]
+			ip := net.ParseIP(ipStr).To4()
+			if ip == nil {
+				return errf("invalid IPv4 address: %s", ipStr)
+			}
+
+			db, cfg, reservations, err := loadDBAndConfig(cfgPath)
+			if err != nil {
+				return err
+			}
+
+			found := false
+			fmt.Println(aurora.Bold(fmt.Sprintf("Search results for %s:", ipStr)))
+			fmt.Println()
+
+			// Check reservations
+			var resMAC string
+			var reservation config.Reservation
+			for mac, res := range reservations {
+				if res.IP == ipStr {
+					found = true
+					resMAC = mac
+					reservation = res
+					break
+				}
+			}
+
+			if resMAC != "" {
+				fmt.Println(aurora.Green("✓ RESERVATION FOUND"))
+				fmt.Printf("  MAC Address: %s\n", aurora.Bold(resMAC))
+				if reservation.Note != "" {
+					fmt.Printf("  Note: %s\n", reservation.Note)
+				}
+				if reservation.EquipmentType != "" {
+					fmt.Printf("  Equipment Type: %s\n", reservation.EquipmentType)
+				}
+				if reservation.Manufacturer != "" {
+					fmt.Printf("  Manufacturer: %s\n", reservation.Manufacturer)
+				}
+				if reservation.ManagementType != "" {
+					fmt.Printf("  Management Type: %s\n", reservation.ManagementType)
+				}
+				if reservation.ManagementInterface != "" {
+					fmt.Printf("  Management Interface: %s\n", reservation.ManagementInterface)
+				}
+				if reservation.FirstSeen > 0 {
+					firstSeen := time.Unix(reservation.FirstSeen, 0).Local()
+					fmt.Printf("  First Seen: %s\n", firstSeen.Format("2006-01-02 15:04:05 MST"))
+				}
+				fmt.Println()
+			} else {
+				fmt.Println(aurora.Yellow("✗ Not in reservations"))
+				fmt.Println()
+			}
+
+			// Check leases
+			if lease, ok := db.FindByIP(ipStr); ok {
+				found = true
+				fmt.Println(aurora.Green("✓ LEASE FOUND"))
+				fmt.Printf("  MAC Address: %s\n", aurora.Bold(lease.MAC))
+				if lease.Hostname != "" {
+					fmt.Printf("  Hostname: %s\n", lease.Hostname)
+				}
+				if lease.AllocatedAt > 0 {
+					allocated := time.Unix(lease.AllocatedAt, 0).Local()
+					fmt.Printf("  Allocated At: %s\n", allocated.Format("2006-01-02 15:04:05 MST"))
+				}
+				if lease.Expiry > 0 {
+					expiry := time.Unix(lease.Expiry, 0).Local()
+					now := time.Now()
+					if now.After(expiry) {
+						fmt.Printf("  Expiry: %s %s\n", expiry.Format("2006-01-02 15:04:05 MST"), aurora.Red("(EXPIRED)"))
+					} else {
+						remaining := expiry.Sub(now)
+						fmt.Printf("  Expiry: %s %s\n", expiry.Format("2006-01-02 15:04:05 MST"), aurora.Green(fmt.Sprintf("(expires in %s)", formatDuration(remaining))))
+					}
+				} else {
+					fmt.Printf("  Expiry: %s\n", aurora.Yellow("No expiry set"))
+				}
+				if lease.FirstSeen > 0 {
+					firstSeen := time.Unix(lease.FirstSeen, 0).Local()
+					fmt.Printf("  First Seen: %s\n", firstSeen.Format("2006-01-02 15:04:05 MST"))
+				}
+				fmt.Println()
+			} else {
+				fmt.Println(aurora.Yellow("✗ Not in leases"))
+				fmt.Println()
+			}
+
+			// Check if MAC matches between reservation and lease
+			if resMAC != "" {
+				if lease, ok := db.FindByIP(ipStr); ok {
+					if !macEqual(resMAC, lease.MAC) {
+						fmt.Println(aurora.Red("⚠ WARNING: MAC address mismatch!"))
+						fmt.Printf("  Reservation MAC: %s\n", resMAC)
+						fmt.Printf("  Lease MAC: %s\n", lease.MAC)
+						fmt.Println()
+					} else {
+						fmt.Println(aurora.Green("✓ MAC addresses match between reservation and lease"))
+						fmt.Println()
+					}
+				}
+			}
+
+			if !found {
+				fmt.Println(aurora.Red("✗ IP address not found in reservations or leases"))
+				fmt.Println()
+				fmt.Println(aurora.Yellow("Suggestion: Try running an ARP scan to see if this IP is active on the network:"))
+				if cfg.Interface != "" {
+					fmt.Printf("  %s arp --iface %s\n", os.Args[0], cfg.Interface)
+				} else {
+					fmt.Printf("  %s arp\n", os.Args[0])
+				}
+			}
+
+			return nil
+		},
+	}
+
+	root.AddCommand(serveCmd, showCmd, statsCmd, checkCmd, reloadCmd, manageCmd, arpCmd, searchCmd)
 	if err := root.Execute(); err != nil {
 		log.Fatal(err)
 	}
@@ -1564,6 +1688,27 @@ func errf(format string, a ...any) error {
 func warnf(format string, a ...any) {
 	msg := fmt.Sprintf(format, a...)
 	fmt.Fprintln(os.Stderr, aurora.Yellow(fmt.Sprintf("WARNING: %s", msg)))
+}
+
+// formatDuration formats a duration in a human-readable way (e.g., "2h30m15s").
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.0fs", d.Seconds())
+	}
+	if d < time.Hour {
+		minutes := int(d.Minutes())
+		seconds := int(d.Seconds()) % 60
+		if seconds > 0 {
+			return fmt.Sprintf("%dm%ds", minutes, seconds)
+		}
+		return fmt.Sprintf("%dm", minutes)
+	}
+	hours := int(d.Hours())
+	minutes := int(d.Minutes()) % 60
+	if minutes > 0 {
+		return fmt.Sprintf("%dh%dm", hours, minutes)
+	}
+	return fmt.Sprintf("%dh", hours)
 }
 
 func mustCIDR(c string) (net.IP, *net.IPNet) {
