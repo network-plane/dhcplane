@@ -36,6 +36,11 @@ type Finding struct {
 	Reason   string `json:"reason"` // unknown|mac-mismatch|banned-mac
 	LeaseMAC string `json:"lease_mac"`
 	ResMAC   string `json:"res_mac"`
+	// Additional diagnostic fields
+	Found    string `json:"found"`    // how it was detected: "arp"
+	Reserved bool   `json:"reserved"` // true if IP is reserved in config
+	Leased   bool   `json:"leased"`   // true if IP has active lease
+	Excluded bool   `json:"excluded"` // true if IP is in exclusions
 }
 
 // Scan is the library version used by the server scheduler.
@@ -135,24 +140,37 @@ func gather(cfg *config.Config, db *dhcpserver.LeaseDB, iface string, allIfaces 
 		state := "free"
 		note := "-"
 		var leaseMAC string
+		var isLeased bool
+		var isReserved bool
+		var isExcluded bool
 
+		// Check if excluded
+		if _, ok := exc[ip.String()]; ok {
+			isExcluded = true
+		}
+
+		// Check if leased
 		if l, ok := db.FindByIP(ip.String()); ok {
 			active := (l.Expiry > 0 && now <= l.Expiry) ||
 				(l.Expiry == 0 && l.AllocatedAt > 0 && now <= l.AllocatedAt+assume)
 			if active {
 				state = "leased"
+				isLeased = true
 				leaseMAC = strings.ToLower(l.MAC)
 			} else {
 				note = "expired-lease"
 			}
 		}
 
+		// Check if reserved
 		if rm, ok := resIP2MAC[ip.String()]; ok {
 			state = "reserved"
+			isReserved = true
 			if !macEqual(rm, rec.MAC) {
 				findings = append(findings, Finding{
 					IP: ip.String(), MAC: rec.MAC, Iface: rec.Iface,
 					Reason: "mac-mismatch", LeaseMAC: leaseMAC, ResMAC: rm,
+					Found: "arp", Reserved: true, Leased: isLeased, Excluded: isExcluded,
 				})
 				note = "mismatch"
 			}
@@ -161,12 +179,14 @@ func gather(cfg *config.Config, db *dhcpserver.LeaseDB, iface string, allIfaces 
 				findings = append(findings, Finding{
 					IP: ip.String(), MAC: rec.MAC, Iface: rec.Iface,
 					Reason: "unknown", LeaseMAC: leaseMAC, ResMAC: "",
+					Found: "arp", Reserved: false, Leased: false, Excluded: isExcluded,
 				})
 				note = "unknown"
 			} else if leaseMAC != "" && !macEqual(leaseMAC, rec.MAC) {
 				findings = append(findings, Finding{
 					IP: ip.String(), MAC: rec.MAC, Iface: rec.Iface,
 					Reason: "mac-mismatch", LeaseMAC: leaseMAC, ResMAC: "",
+					Found: "arp", Reserved: false, Leased: true, Excluded: isExcluded,
 				})
 				note = "mismatch"
 			}
@@ -177,6 +197,7 @@ func gather(cfg *config.Config, db *dhcpserver.LeaseDB, iface string, allIfaces 
 				findings = append(findings, Finding{
 					IP: ip.String(), MAC: rec.MAC, Iface: rec.Iface,
 					Reason: "banned-mac", LeaseMAC: leaseMAC, ResMAC: resIP2MAC[ip.String()],
+					Found: "arp", Reserved: isReserved, Leased: isLeased, Excluded: isExcluded,
 				})
 				if note == "-" {
 					note = "banned-mac"

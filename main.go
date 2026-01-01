@@ -1,10 +1,6 @@
 package main
 
 import (
-	"dhcplane/arp"
-	"dhcplane/config"
-	"dhcplane/dhcpserver"
-	"dhcplane/statistics"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,12 +17,16 @@ import (
 	"text/tabwriter"
 	"time"
 
-	planeconsole "github.com/network-plane/planeconsole"
-
 	"github.com/fsnotify/fsnotify"
 	"github.com/logrusorgru/aurora"
+	planeconsole "github.com/network-plane/planeconsole"
 	"github.com/spf13/cobra"
 	"gopkg.in/natefinch/lumberjack.v2"
+
+	"dhcplane/arp"
+	"dhcplane/config"
+	"dhcplane/dhcpserver"
+	"dhcplane/statistics"
 )
 
 var appVersion = "0.1.47"
@@ -1187,8 +1187,16 @@ func triggerARPScan(
 	}
 	_ = entries // reserved for future use
 	for _, f := range findings {
-		logf("ARP-ANOMALY ip=%s mac=%s iface=%s reason=%s lease_mac=%s res_mac=%s",
-			f.IP, f.MAC, f.Iface, f.Reason, f.LeaseMAC, f.ResMAC)
+		// Build log message with conditional MAC fields
+		msg := fmt.Sprintf("ARP-ANOMALY ip=%s mac=%s iface=%s reason=%s found=%s reserved=%t leased=%t excluded=%t",
+			f.IP, f.MAC, f.Iface, f.Reason, f.Found, f.Reserved, f.Leased, f.Excluded)
+		if f.Leased && f.LeaseMAC != "" {
+			msg += fmt.Sprintf(" lease_mac=%s", f.LeaseMAC)
+		}
+		if f.Reserved && f.ResMAC != "" {
+			msg += fmt.Sprintf(" res_mac=%s", f.ResMAC)
+		}
+		logf("%s", msg)
 	}
 }
 

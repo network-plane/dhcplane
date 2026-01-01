@@ -41,3 +41,4 @@ tooling/
 dhcplane
 dhcplane.exe
 *.log.gz
+.trunk/
