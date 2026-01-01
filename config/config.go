@@ -270,12 +270,68 @@ func SaveReservations(path string, reservations Reservations) error {
 // ParseStrict reads the config file strictly (unknown fields rejected) and
 // preserves the same defaults/behavior as the original parseConfigStrict.
 // Returns config and reservations loaded from separate file.
+// If the config file contains a "reservations" field (old format), it will be
+// automatically migrated to the separate reservations file and removed from the config.
 func ParseStrict(path string) (Config, Reservations, string, *JSONErr) {
 	var cfg Config
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return cfg, nil, "", &JSONErr{Err: err}
 	}
+	
+	// Check for old format with reservations in config file
+	var rawMap map[string]interface{}
+	if err := json.Unmarshal(data, &rawMap); err == nil {
+		if reservationsRaw, exists := rawMap["reservations"]; exists && reservationsRaw != nil {
+			// Migrate reservations from old config format
+			var oldReservations Reservations
+			reservationsJSON, err := json.Marshal(reservationsRaw)
+			if err == nil {
+				if err := json.Unmarshal(reservationsJSON, &oldReservations); err == nil && len(oldReservations) > 0 {
+					// Determine reservations path
+					reservationsPath := ""
+					if pathRaw, ok := rawMap["reservations_path"].(string); ok && pathRaw != "" {
+						reservationsPath = pathRaw
+					}
+					cfgDir := filepath.Dir(path)
+					if reservationsPath == "" {
+						reservationsPath = filepath.Join(cfgDir, "dhcplane.reservations")
+					} else if !filepath.IsAbs(reservationsPath) {
+						reservationsPath = filepath.Join(cfgDir, reservationsPath)
+					}
+					
+					// Load existing reservations (if any)
+					existingReservations, _ := LoadReservations(reservationsPath)
+					
+					// Merge old reservations with existing ones (existing take precedence)
+					mergedReservations := make(Reservations)
+					for k, v := range oldReservations {
+						mergedReservations[k] = v
+					}
+					for k, v := range existingReservations {
+						mergedReservations[k] = v // Existing reservations override migrated ones
+					}
+					
+					// Save merged reservations
+					if err := SaveReservations(reservationsPath, mergedReservations); err == nil {
+						// Remove reservations from config and save cleaned config
+						delete(rawMap, "reservations")
+						cleanedJSON, err := json.MarshalIndent(rawMap, "", "  ")
+						if err == nil {
+							tmp := path + ".tmp"
+							if err := os.WriteFile(tmp, cleanedJSON, 0644); err == nil {
+								if err := os.Rename(tmp, path); err == nil {
+									// Re-read the cleaned config
+									data, _ = os.ReadFile(path)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	
 	dec := json.NewDecoder(strings.NewReader(string(data)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {

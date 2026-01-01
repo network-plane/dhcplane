@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"dhcplane/config"
-
 	"github.com/logrusorgru/aurora"
+
+	"dhcplane/config"
 )
 
 /* ----------------- Public types & input shape ----------------- */
