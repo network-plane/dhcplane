@@ -1155,8 +1155,8 @@ func main() {
 					Note:      note,
 					FirstSeen: now,
 				}
-				fmt.Printf("Added reservation: %s -> %s  note=%q  first_seen=%s\n",
-					norm, ip.String(), note, dhcpserver.FormatEpoch(now))
+				fmt.Printf("Added reservation: %s -> %s  note=%q  %s=%s\n",
+					norm, ip.String(), note, aurora.Red("first_seen"), dhcpserver.FormatEpoch(now))
 			} else {
 				fs := prev.FirstSeen
 				if fs == 0 {
@@ -1171,8 +1171,8 @@ func main() {
 					ManagementType:      prev.ManagementType,
 					ManagementInterface: prev.ManagementInterface,
 				}
-				fmt.Printf("Updated reservation: %s  %s -> %s  note=%q (first_seen=%s)\n",
-					norm, prev.IP, ip.String(), note, dhcpserver.FormatEpoch(fs))
+				fmt.Printf("Updated reservation: %s  %s -> %s  note=%q (%s=%s)\n",
+					norm, prev.IP, ip.String(), note, aurora.Red("first_seen"), dhcpserver.FormatEpoch(fs))
 			}
 
 			// Write reservations to separate file
@@ -1312,7 +1312,7 @@ func main() {
 				}
 				if reservation.FirstSeen > 0 {
 					firstSeen := time.Unix(reservation.FirstSeen, 0).Local()
-					fmt.Printf("  First Seen: %s\n", firstSeen.Format("2006-01-02 15:04:05 MST"))
+					fmt.Printf("  %s: %s\n", aurora.Red("First Seen"), firstSeen.Format("2006-01-02 15:04:05 MST"))
 				}
 				fmt.Println()
 			} else {
@@ -1346,7 +1346,7 @@ func main() {
 				}
 				if lease.FirstSeen > 0 {
 					firstSeen := time.Unix(lease.FirstSeen, 0).Local()
-					fmt.Printf("  First Seen: %s\n", firstSeen.Format("2006-01-02 15:04:05 MST"))
+					fmt.Printf("  %s: %s\n", aurora.Red("First Seen"), firstSeen.Format("2006-01-02 15:04:05 MST"))
 				}
 				fmt.Println()
 			} else {
