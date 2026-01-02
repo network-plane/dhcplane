@@ -51,7 +51,7 @@ func buildConsoleConfig(maxLines int) planeconsole.Config {
 			{Match: "DISCOVER", CaseSensitive: true, Style: &planeconsole.Style{FG: "yellow", Attrs: "b"}},
 			{Match: "RELEASE", CaseSensitive: true, Style: &planeconsole.Style{FG: "yellow", Attrs: "b"}},
 			{Match: "DECLINE", CaseSensitive: true, Style: &planeconsole.Style{FG: "yellow", Attrs: "b"}},
-			{Match: "DETECT", CaseSensitive: true, Style: &planeconsole.Style{FG: "green", Attrs: "b"}},
+			{Match: "DETECT DHCPSERVERS", CaseSensitive: true, Style: &planeconsole.Style{FG: "green", Attrs: "b"}},
 			{Match: "FOREIGN-DHCP-SERVER", CaseSensitive: true, Style: &planeconsole.Style{FG: "red", Attrs: "b"}},
 			{Match: "ARP-ANOMALY", CaseSensitive: true, Style: &planeconsole.Style{FG: "red", Attrs: "b"}},
 		},
@@ -253,7 +253,7 @@ func readPID(pidPath string) (int, error) {
 // logDetect prints the detection mode line to logs and console via logSink.
 func logDetect(cfg *config.Config, iface string, logSink func(string, ...any)) {
 	if cfg.DetectDHCPServers.Enabled {
-		logSink("DETECT start mode=%s interval=%ds rate_limit=%d/min iface=%s whitelist=%d",
+		logSink("DETECT DHCPSERVERS start mode=%s interval=%ds rate_limit=%d/min iface=%s whitelist=%d",
 			strings.ToLower(strings.TrimSpace(cfg.DetectDHCPServers.ActiveProbe)),
 			cfg.DetectDHCPServers.ProbeInterval,
 			cfg.DetectDHCPServers.RateLimit,
@@ -261,7 +261,7 @@ func logDetect(cfg *config.Config, iface string, logSink func(string, ...any)) {
 			len(cfg.DetectDHCPServers.WhitelistServers),
 		)
 	} else {
-		logSink("DETECT disabled (config) iface=%s", iface)
+		logSink("DETECT DHCPSERVERS disabled (config) iface=%s", iface)
 	}
 }
 
@@ -447,7 +447,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 		logSink("START auto_reload=true (watching %s)", cfgPath)
 	}
 
-	// DETECT announcement on startup
+	// DETECT DHCPSERVERS announcement on startup
 	logDetect(&cfg, currentIface, logSink)
 
 	// ARP anomaly scheduler (goroutine-based)
@@ -641,7 +641,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 			}
 			logSink("RELOAD: config applied")
 
-			// DETECT announcement after manual reload
+			// DETECT DHCPSERVERS announcement after manual reload
 			logDetect(&newCfg, currentIface, logSink)
 
 		case syscall.SIGINT, syscall.SIGTERM:
@@ -1491,7 +1491,7 @@ func triggerDHCPServerScan(
 		return
 	}
 
-	logf("DETECT scan started iface=%s", iface)
+	logf("DETECT DHCPSERVERS scan started iface=%s", iface)
 
 	// Listen for OFFER responses
 	seenServers := make(map[string]bool)
@@ -1545,9 +1545,9 @@ func triggerDHCPServerScan(
 
 	// Log completion
 	if len(seenServers) == 0 {
-		logf("DETECT scan completed iface=%s (no foreign servers found)", iface)
+		logf("DETECT DHCPSERVERS scan completed iface=%s (no foreign servers found)", iface)
 	} else {
-		logf("DETECT scan completed iface=%s (found %d server(s))", iface, len(seenServers))
+		logf("DETECT DHCPSERVERS scan completed iface=%s (found %d server(s))", iface, len(seenServers))
 	}
 }
 
