@@ -312,7 +312,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 	
 	db := dhcpserver.NewLeaseDB(leasePath)
 	if err := db.Load(); err != nil {
-		log.Printf("lease db load: %v (continuing with empty)", err)
+		warnf("lease db load: %v (continuing with empty)", err)
 	}
 
 	// Logger (file or rotating)
@@ -351,6 +351,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 	// Sinks
 	logSink := func(format string, args ...any) {
 		msg := fmt.Sprintf(format, args...)
+		// Write uncolored to log file
 		if lg != nil {
 			lg.Printf("%s", msg)
 		}
@@ -361,10 +362,17 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 			consoleBroker.Append(ts + " " + msg)
 		}
 
-		fmt.Fprintln(os.Stdout, msg)
+		// Color warnings in console output (but not in logs)
+		lowerMsg := strings.ToLower(msg)
+		if strings.Contains(lowerMsg, "warning:") || strings.Contains(lowerMsg, "warn:") {
+			fmt.Fprintln(os.Stdout, aurora.Yellow(msg))
+		} else {
+			fmt.Fprintln(os.Stdout, msg)
+		}
 	}
 	errorSink := func(format string, args ...any) {
 		msg := fmt.Sprintf("ERROR: "+format, args...)
+		// Write uncolored to log file
 		if lg != nil {
 			lg.Printf("%s", msg)
 		}
@@ -372,7 +380,8 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 		if consoleBroker != nil {
 			consoleBroker.Append(ts + " " + msg)
 		}
-		fmt.Fprintln(os.Stderr, msg)
+		// Color errors red in console output (but not in logs)
+		fmt.Fprintln(os.Stderr, aurora.Red(msg))
 	}
 
 	// Log initial warnings
@@ -1377,7 +1386,8 @@ func main() {
 
 	root.AddCommand(serveCmd, showCmd, statsCmd, checkCmd, reloadCmd, manageCmd, arpCmd, searchCmd)
 	if err := root.Execute(); err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, aurora.Red(fmt.Sprintf("ERROR: %v", err)))
+		os.Exit(1)
 	}
 }
 
@@ -1723,7 +1733,8 @@ func formatDuration(d time.Duration) string {
 func mustCIDR(c string) (net.IP, *net.IPNet) {
 	ip, n, err := net.ParseCIDR(c)
 	if err != nil {
-		log.Fatalf("bad subnet_cidr %q: %v", c, err)
+		fmt.Fprintln(os.Stderr, aurora.Red(fmt.Sprintf("ERROR: bad subnet_cidr %q: %v", c, err)))
+		os.Exit(1)
 	}
 	return ip, n
 }
