@@ -42,3 +42,4 @@ dhcplane
 dhcplane.exe
 *.log.gz
 .trunk/
+builds/
