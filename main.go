@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -1079,10 +1080,25 @@ func main() {
 			if err != nil {
 				return fmt.Errorf("read pid: %w", err)
 			}
-			if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+			process, err := os.FindProcess(pid)
+			if err != nil {
+				return fmt.Errorf("find process: %w", err)
+			}
+			// Use SIGHUP on Unix, SIGINT on Windows (SIGHUP doesn't exist on Windows)
+			var sig os.Signal
+			if runtime.GOOS == "windows" {
+				sig = os.Interrupt // Windows doesn't have SIGHUP
+			} else {
+				sig = syscall.SIGHUP
+			}
+			if err := process.Signal(sig); err != nil {
 				return fmt.Errorf("signal: %w", err)
 			}
-			fmt.Printf("Sent SIGHUP to pid %d\n", pid)
+			if runtime.GOOS == "windows" {
+				fmt.Printf("Sent SIGINT to pid %d\n", pid)
+			} else {
+				fmt.Printf("Sent SIGHUP to pid %d\n", pid)
+			}
 			return nil
 		},
 	}
