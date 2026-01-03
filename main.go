@@ -30,7 +30,7 @@ import (
 	"dhcplane/statistics"
 )
 
-var appVersion = "0.1.53"
+var appVersion = "0.1.55"
 
 func buildConsoleConfig(maxLines int) planeconsole.Config {
 	if maxLines <= 0 {
