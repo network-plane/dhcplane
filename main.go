@@ -368,7 +368,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 		if strings.Contains(lowerMsg, "warning:") || strings.Contains(lowerMsg, "warn:") {
 			fmt.Fprintln(os.Stdout, aurora.Yellow(msg))
 		} else {
-			fmt.Fprintln(os.Stdout, msg)
+		fmt.Fprintln(os.Stdout, msg)
 		}
 	}
 	errorSink := func(format string, args ...any) {
@@ -521,7 +521,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 	// Optional auto-reload watcher
 	var watcher *fsnotify.Watcher
 	var watcherErr error
-		if cfg.AutoReload {
+	if cfg.AutoReload {
 			watcher, watcherErr = startConfigWatcher(cfgPath, reservationsPath, func(newCfg config.Config, newReservations config.Reservations, newWarns []string) {
 			// Compare authoritative before swapping
 			oldAuth := effectiveAuthoritative(cfgGet())
@@ -871,10 +871,10 @@ func main() {
 	
 	// Migrate old config filename if needed
 	root.PersistentPreRunE = func(_ *cobra.Command, _ []string) error {
-		if showVersion {
-			fmt.Println(appVersion)
-			os.Exit(0)
-		}
+			if showVersion {
+				fmt.Println(appVersion)
+				os.Exit(0)
+			}
 		// Migrate old config filename before any command runs
 		if err := migrateConfigFilename(cfgPath); err != nil {
 			return err
@@ -891,7 +891,7 @@ func main() {
 			reservationsPath := filepath.Join(cfgDir, "dhcplane.reservations")
 			checkReservationsFileMigration(reservationsPath)
 		}
-		return nil
+			return nil
 	}
 
 	// Inject the client-side attach command into this binary.
@@ -1097,7 +1097,7 @@ func main() {
 			if runtime.GOOS == "windows" {
 				fmt.Printf("Sent SIGINT to pid %d\n", pid)
 			} else {
-				fmt.Printf("Sent SIGHUP to pid %d\n", pid)
+			fmt.Printf("Sent SIGHUP to pid %d\n", pid)
 			}
 			return nil
 		},

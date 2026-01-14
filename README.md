@@ -277,13 +277,13 @@ Reservations are stored in a separate JSON file (default: `dhcplane.reservations
 ```json
 {
   "aa:bb:cc:dd:ee:ff": {
-    "ip": "192.168.178.10",
-    "note": "human note",
-    "first_seen": 1725550000,
-    "equipment_type": "Switch",
-    "manufacturer": "Ubiquiti",
-    "management_type": "web",
-    "management_interface": "https://192.168.178.10"
+  "ip": "192.168.178.10",
+  "note": "human note",
+  "first_seen": 1725550000,
+  "equipment_type": "Switch",
+  "manufacturer": "Ubiquiti",
+  "management_type": "web",
+  "management_interface": "https://192.168.178.10"
   }
 }
 ```
