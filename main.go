@@ -1,6 +1,10 @@
 package main
 
 import (
+	"dhcplane/arp"
+	"dhcplane/config"
+	"dhcplane/dhcpserver"
+	"dhcplane/statistics"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,11 +28,6 @@ import (
 	planeconsole "github.com/network-plane/planeconsole"
 	"github.com/spf13/cobra"
 	"gopkg.in/natefinch/lumberjack.v2"
-
-	"dhcplane/arp"
-	"dhcplane/config"
-	"dhcplane/dhcpserver"
-	"dhcplane/statistics"
 )
 
 var appVersion = "0.1.55"
@@ -204,13 +203,20 @@ func buildConsoleBroker(maxLines int, tcpAddr string) (*planeconsole.Broker, str
 /* ----------------- Logging ----------------- */
 
 func setupLogger(cfg config.Config) (*log.Logger, io.Closer, error) {
-	filename := cfg.Logging.Filename
-	if filename == "" {
-		filename = "dhcplane.log"
-	}
-	full := filename
-	if cfg.Logging.Path != "" {
-		full = filepath.Join(cfg.Logging.Path, filename)
+	var full string
+	if cfg.Logging.LogFile != "" {
+		// New style: single log_file path (already resolved by ValidateAndNormalizeConfig)
+		full = cfg.Logging.LogFile
+	} else {
+		// Legacy style: separate path and filename
+		filename := cfg.Logging.Filename
+		if filename == "" {
+			filename = "dhcplane.log"
+		}
+		full = filename
+		if cfg.Logging.Path != "" {
+			full = filepath.Join(cfg.Logging.Path, filename)
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil && !os.IsExist(err) {
 		return nil, nil, err
@@ -266,16 +272,285 @@ func logDetect(cfg *config.Config, iface string, logSink func(string, ...any)) {
 	}
 }
 
+// PathOverrides holds command-line overrides for file paths.
+type PathOverrides struct {
+	LeasesPath       string
+	ReservationsPath string
+	LogFilePath      string
+	PIDFilePath      string
+}
+
+// applyPathOverrides applies command-line path overrides to the config.
+func applyPathOverrides(cfg *config.Config, overrides PathOverrides) {
+	if overrides.LeasesPath != "" {
+		cfg.LeaseDBPath = config.ResolveFilePath(overrides.LeasesPath, "dhcplane.leases", "")
+	}
+	if overrides.ReservationsPath != "" {
+		cfg.ReservationsPath = config.ResolveFilePath(overrides.ReservationsPath, "dhcplane.reservations", "")
+	}
+	if overrides.LogFilePath != "" {
+		cfg.Logging.LogFile = config.ResolveFilePath(overrides.LogFilePath, "dhcplane.log", "")
+		// Clear legacy fields to avoid confusion
+		cfg.Logging.Path = ""
+		cfg.Logging.Filename = ""
+	}
+	if overrides.PIDFilePath != "" {
+		cfg.PIDFile = config.ResolveFilePath(overrides.PIDFilePath, "dhcplane.pid", "")
+	}
+}
+
+// FileCheckResult holds the result of a file path validation check.
+type FileCheckResult struct {
+	Path        string
+	Description string
+	Exists      bool
+	DirExists   bool
+	Writable    bool
+	Error       error
+}
+
+// validateFilePaths checks if all required file paths are accessible and writable.
+// Returns a slice of check results and an overall error if any critical path fails.
+func validateFilePaths(cfg config.Config) ([]FileCheckResult, error) {
+	var results []FileCheckResult
+	var errors []string
+
+	// Define paths to check with their descriptions
+	pathsToCheck := []struct {
+		path        string
+		description string
+		critical    bool // if true, failure stops startup
+	}{
+		{cfg.LeaseDBPath, "Leases database", true},
+		{cfg.ReservationsPath, "Reservations file", true},
+		{cfg.PIDFile, "PID file", true},
+	}
+
+	// Add log file path
+	logPath := cfg.Logging.LogFile
+	if logPath == "" && cfg.Logging.Path != "" {
+		filename := cfg.Logging.Filename
+		if filename == "" {
+			filename = "dhcplane.log"
+		}
+		logPath = filepath.Join(cfg.Logging.Path, filename)
+	} else if logPath == "" {
+		logPath = cfg.Logging.Filename
+		if logPath == "" {
+			logPath = "dhcplane.log"
+		}
+	}
+	pathsToCheck = append(pathsToCheck, struct {
+		path        string
+		description string
+		critical    bool
+	}{logPath, "Log file", true})
+
+	for _, p := range pathsToCheck {
+		result := checkFilePath(p.path, p.description)
+		results = append(results, result)
+
+		if result.Error != nil && p.critical {
+			errors = append(errors, fmt.Sprintf("%s (%s): %v", p.description, p.path, result.Error))
+		}
+	}
+
+	if len(errors) > 0 {
+		return results, fmt.Errorf("startup file path validation failed:\n  - %s", strings.Join(errors, "\n  - "))
+	}
+
+	return results, nil
+}
+
+// checkFilePath validates a single file path.
+func checkFilePath(path, description string) FileCheckResult {
+	result := FileCheckResult{
+		Path:        path,
+		Description: description,
+	}
+
+	if path == "" {
+		result.Error = fmt.Errorf("path is empty")
+		return result
+	}
+
+	// Get absolute path for clearer error messages
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		result.Error = fmt.Errorf("cannot resolve absolute path: %w", err)
+		return result
+	}
+	result.Path = absPath
+
+	// Check if file exists
+	fileInfo, err := os.Stat(absPath)
+	if err == nil {
+		result.Exists = true
+		result.DirExists = true
+
+		// File exists, check if writable
+		if err := checkWritable(absPath, fileInfo.IsDir()); err != nil {
+			result.Error = fmt.Errorf("file exists but is not writable: %w", err)
+			return result
+		}
+		result.Writable = true
+		return result
+	}
+
+	if !os.IsNotExist(err) {
+		result.Error = fmt.Errorf("cannot stat file: %w", err)
+		return result
+	}
+
+	// File doesn't exist, check if directory exists
+	dir := filepath.Dir(absPath)
+	dirInfo, err := os.Stat(dir)
+	if err == nil {
+		if !dirInfo.IsDir() {
+			result.Error = fmt.Errorf("parent path %s exists but is not a directory", dir)
+			return result
+		}
+		result.DirExists = true
+
+		// Directory exists, check if we can create file
+		if err := checkCanCreateFile(absPath); err != nil {
+			result.Error = fmt.Errorf("directory exists but cannot create file: %w", err)
+			return result
+		}
+		result.Writable = true
+		return result
+	}
+
+	if !os.IsNotExist(err) {
+		result.Error = fmt.Errorf("cannot stat parent directory %s: %w", dir, err)
+		return result
+	}
+
+	// Directory doesn't exist, try to create it
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		result.Error = fmt.Errorf("cannot create directory %s: %w (check permissions or run as root)", dir, err)
+		return result
+	}
+	result.DirExists = true
+
+	// Now check if we can create the file
+	if err := checkCanCreateFile(absPath); err != nil {
+		result.Error = fmt.Errorf("created directory but cannot create file: %w", err)
+		return result
+	}
+	result.Writable = true
+
+	return result
+}
+
+// checkWritable checks if a file or directory is writable.
+func checkWritable(path string, isDir bool) error {
+	if isDir {
+		// For directories, try to create a temp file
+		testFile := filepath.Join(path, ".dhcplane_write_test")
+		f, err := os.Create(testFile)
+		if err != nil {
+			return fmt.Errorf("cannot write to directory: %w", err)
+		}
+		f.Close()
+		os.Remove(testFile)
+		return nil
+	}
+
+	// For files, try to open for writing
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("cannot open for writing: %w", err)
+	}
+	f.Close()
+	return nil
+}
+
+// checkCanCreateFile attempts to create and immediately remove a file to verify write permissions.
+func checkCanCreateFile(path string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("cannot create file: %w", err)
+	}
+	f.Close()
+	// Remove the test file - we just wanted to check we can create it
+	// Note: For actual data files, they'll be created by their respective handlers
+	os.Remove(path)
+	return nil
+}
+
+// printStartupValidation prints the results of file path validation.
+func printStartupValidation(results []FileCheckResult, logSink func(string, ...any)) {
+	logSink("STARTUP file path validation:")
+	for _, r := range results {
+		status := "OK"
+		details := ""
+
+		if r.Error != nil {
+			status = "FAIL"
+			details = fmt.Sprintf(" - %v", r.Error)
+		} else if !r.Exists {
+			status = "OK (will create)"
+		}
+
+		logSink("  %s: %s [%s]%s", r.Description, r.Path, status, details)
+	}
+}
+
 // buildServerAndRun starts the DHCP server and optional console broker, handles reloads and signals.
-func buildServerAndRun(cfgPath string, enableConsole bool) error {
+func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrides) error {
 	// Load + validate/normalize initial config
 	raw, reservations, reservationsPath, jerr := config.ParseStrict(cfgPath)
 	if jerr != nil {
 		return fmt.Errorf("config error: %w", jerr)
 	}
+
+	// Apply command-line path overrides before validation
+	applyPathOverrides(&raw, overrides)
+
+	// If reservations path was overridden, reload from the new path
+	if overrides.ReservationsPath != "" && raw.ReservationsPath != reservationsPath {
+		reservationsPath = raw.ReservationsPath
+		var err error
+		reservations, err = config.LoadReservations(reservationsPath)
+		if err != nil {
+			return fmt.Errorf("load reservations from override path: %w", err)
+		}
+	}
+
 	cfg, warns, verr := config.ValidateAndNormalizeConfig(raw)
 	if verr != nil {
 		return fmt.Errorf("config validation: %w", verr)
+	}
+
+	// Validate file paths before proceeding
+	// This checks if all required directories and files are accessible/writable
+	validationResults, validationErr := validateFilePaths(cfg)
+	if validationErr != nil {
+		// Print detailed validation results to console (we can't log yet)
+		fmt.Fprintln(os.Stderr, aurora.Red("STARTUP VALIDATION FAILED"))
+		fmt.Fprintln(os.Stderr, "")
+		for _, r := range validationResults {
+			status := aurora.Green("✓ OK")
+			if r.Error != nil {
+				status = aurora.Red("✗ FAIL")
+			} else if !r.Exists {
+				status = aurora.Yellow("○ Will create")
+			}
+			fmt.Fprintf(os.Stderr, "  %s %s\n", status, r.Description)
+			fmt.Fprintf(os.Stderr, "    Path: %s\n", r.Path)
+			if r.Error != nil {
+				fmt.Fprintf(os.Stderr, "    %s\n", aurora.Red(fmt.Sprintf("Error: %v", r.Error)))
+			}
+		}
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, aurora.Yellow("Suggestions:"))
+		fmt.Fprintln(os.Stderr, "  - Ensure the directories exist and have proper permissions")
+		fmt.Fprintln(os.Stderr, "  - Run with sudo or as root if using system directories")
+		fmt.Fprintln(os.Stderr, "  - Use --leases, --reservations, --log-file flags to specify different paths")
+		fmt.Fprintln(os.Stderr, "  - Or modify the config file to use accessible paths")
+		fmt.Fprintln(os.Stderr, "")
+		return validationErr
 	}
 
 	// Migrate leases file if needed
@@ -307,10 +582,10 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 			}
 		}
 	}
-	
+
 	// Check reservations file migration
 	checkReservationsFileMigration(reservationsPath)
-	
+
 	db := dhcpserver.NewLeaseDB(leasePath)
 	if err := db.Load(); err != nil {
 		warnf("lease db load: %v (continuing with empty)", err)
@@ -368,7 +643,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 		if strings.Contains(lowerMsg, "warning:") || strings.Contains(lowerMsg, "warn:") {
 			fmt.Fprintln(os.Stdout, aurora.Yellow(msg))
 		} else {
-		fmt.Fprintln(os.Stdout, msg)
+			fmt.Fprintln(os.Stdout, msg)
 		}
 	}
 	errorSink := func(format string, args ...any) {
@@ -385,6 +660,9 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 		fmt.Fprintln(os.Stderr, aurora.Red(msg))
 	}
 
+	// Log successful startup validation
+	printStartupValidation(validationResults, logSink)
+
 	// Log initial warnings
 	for _, w := range warns {
 		logSink("%s", w)
@@ -394,7 +672,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 	var cfgAtomic atomic.Value
 	cfgAtomic.Store(&cfg)
 	cfgGet := func() *config.Config { return cfgAtomic.Load().(*config.Config) }
-	
+
 	// Atomic reservations snapshot
 	var reservationsAtomic atomic.Value
 	reservationsAtomic.Store(reservations)
@@ -431,7 +709,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 	// Bind + Serve, with rebind support when Interface changes
 	laddr := &net.UDPAddr{IP: net.ParseIP("0.0.0.0"), Port: 67}
 	var closerUDP ioCloser
-	var currentIface = cfg.Interface
+	currentIface := cfg.Interface
 
 	bind := func(newIface string) error {
 		if closerUDP != nil {
@@ -522,7 +800,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool) error {
 	var watcher *fsnotify.Watcher
 	var watcherErr error
 	if cfg.AutoReload {
-			watcher, watcherErr = startConfigWatcher(cfgPath, reservationsPath, func(newCfg config.Config, newReservations config.Reservations, newWarns []string) {
+		watcher, watcherErr = startConfigWatcher(cfgPath, reservationsPath, func(newCfg config.Config, newReservations config.Reservations, newWarns []string) {
 			// Compare authoritative before swapping
 			oldAuth := effectiveAuthoritative(cfgGet())
 			newAuth := effectiveAuthoritative(&newCfg)
@@ -855,9 +1133,13 @@ func addConsoleCommands(root *cobra.Command) {
 
 func main() {
 	var (
-		cfgPath     string
-		console     bool
-		showVersion bool
+		cfgPath          string
+		console          bool
+		showVersion      bool
+		leasesPath       string
+		reservationsPath string
+		logFilePath      string
+		pidFilePath      string
 	)
 
 	root := &cobra.Command{
@@ -868,13 +1150,18 @@ func main() {
 	root.PersistentFlags().StringVarP(&cfgPath, "config", "", "dhcplane.config", "Path to config file")
 	// authoritative is now config-driven; flag removed
 	root.PersistentFlags().BoolVar(&console, "console", false, "Export console over UNIX socket (or TCP if console_tcp_address is set) in addition to stdout/stderr logging")
-	
+	// File path flags (override config file settings)
+	root.PersistentFlags().StringVar(&leasesPath, "leases", "", "Path to leases file (directory or full path; overrides config)")
+	root.PersistentFlags().StringVar(&reservationsPath, "reservations", "", "Path to reservations file (directory or full path; overrides config)")
+	root.PersistentFlags().StringVar(&logFilePath, "log-file", "", "Path to log file (directory or full path; overrides config)")
+	root.PersistentFlags().StringVar(&pidFilePath, "pid-file", "", "Path to PID file (directory or full path; overrides config)")
+
 	// Migrate old config filename if needed
 	root.PersistentPreRunE = func(_ *cobra.Command, _ []string) error {
-			if showVersion {
-				fmt.Println(appVersion)
-				os.Exit(0)
-			}
+		if showVersion {
+			fmt.Println(appVersion)
+			os.Exit(0)
+		}
 		// Migrate old config filename before any command runs
 		if err := migrateConfigFilename(cfgPath); err != nil {
 			return err
@@ -891,7 +1178,7 @@ func main() {
 			reservationsPath := filepath.Join(cfgDir, "dhcplane.reservations")
 			checkReservationsFileMigration(reservationsPath)
 		}
-			return nil
+		return nil
 	}
 
 	// Inject the client-side attach command into this binary.
@@ -912,7 +1199,13 @@ func main() {
 				return fmt.Errorf("config error: %w", jerr)
 			}
 
-			return buildServerAndRun(cfgPath, console)
+			overrides := PathOverrides{
+				LeasesPath:       leasesPath,
+				ReservationsPath: reservationsPath,
+				LogFilePath:      logFilePath,
+				PIDFilePath:      pidFilePath,
+			}
+			return buildServerAndRun(cfgPath, console, overrides)
 		},
 	}
 
@@ -1097,7 +1390,7 @@ func main() {
 			if runtime.GOOS == "windows" {
 				fmt.Printf("Sent SIGINT to pid %d\n", pid)
 			} else {
-			fmt.Printf("Sent SIGHUP to pid %d\n", pid)
+				fmt.Printf("Sent SIGHUP to pid %d\n", pid)
 			}
 			return nil
 		},
@@ -1592,11 +1885,11 @@ func cfgGetForCLI(cfgPath string) (config.Config, config.Reservations) {
 func migrateConfigFilename(cfgPath string) error {
 	cfgDir := filepath.Dir(cfgPath)
 	cfgBase := filepath.Base(cfgPath)
-	
+
 	if cfgDir == "." {
 		cfgDir, _ = os.Getwd()
 	}
-	
+
 	// Determine old and new paths
 	var oldPath, newPath string
 	if cfgBase == "dhcplane.config" || cfgBase == "dhcplane.json" {
@@ -1613,7 +1906,7 @@ func migrateConfigFilename(cfgPath string) error {
 	} else {
 		return nil // Not a config file pattern
 	}
-	
+
 	oldExists := false
 	newExists := false
 	if _, err := os.Stat(oldPath); err == nil {
@@ -1622,13 +1915,13 @@ func migrateConfigFilename(cfgPath string) error {
 	if _, err := os.Stat(newPath); err == nil {
 		newExists = true
 	}
-	
+
 	if oldExists && newExists {
 		// Both exist, warn in yellow
 		fmt.Fprintln(os.Stderr, aurora.Yellow(fmt.Sprintf("WARNING: Both old config file (%s) and new config file (%s) exist. Using new file.", oldPath, newPath)))
 		return nil
 	}
-	
+
 	if oldExists && !newExists {
 		// Old exists, new doesn't - migrate
 		if err := os.Rename(oldPath, newPath); err != nil {
@@ -1637,7 +1930,7 @@ func migrateConfigFilename(cfgPath string) error {
 			os.Exit(1)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -1646,11 +1939,11 @@ func migrateConfigFilename(cfgPath string) error {
 func migrateLeasesFile(leasePath string) error {
 	leaseDir := filepath.Dir(leasePath)
 	leaseBase := filepath.Base(leasePath)
-	
+
 	if leaseDir == "." {
 		leaseDir, _ = os.Getwd()
 	}
-	
+
 	// Determine old and new paths
 	var oldPath, newPath string
 	if leaseBase == "dhcplane.leases" || leaseBase == "leases.json" {
@@ -1659,7 +1952,7 @@ func migrateLeasesFile(leasePath string) error {
 	} else {
 		return nil // Custom path, no migration
 	}
-	
+
 	oldExists := false
 	newExists := false
 	if _, err := os.Stat(oldPath); err == nil {
@@ -1668,13 +1961,13 @@ func migrateLeasesFile(leasePath string) error {
 	if _, err := os.Stat(newPath); err == nil {
 		newExists = true
 	}
-	
+
 	if oldExists && newExists {
 		// Both exist, warn in yellow
 		fmt.Fprintln(os.Stderr, aurora.Yellow(fmt.Sprintf("WARNING: Both old leases file (%s) and new leases file (%s) exist. Using new file.", oldPath, newPath)))
 		return nil
 	}
-	
+
 	if oldExists && !newExists {
 		// Old exists, new doesn't - migrate
 		if err := os.Rename(oldPath, newPath); err != nil {
@@ -1683,22 +1976,22 @@ func migrateLeasesFile(leasePath string) error {
 			os.Exit(1)
 		}
 	}
-	
+
 	return nil
 }
 
 // checkReservationsFileMigration checks for old reservations file format and warns if both exist.
 func checkReservationsFileMigration(reservationsPath string) {
 	reservationsDir := filepath.Dir(reservationsPath)
-	
+
 	if reservationsDir == "." {
 		reservationsDir, _ = os.Getwd()
 	}
-	
+
 	// Check for old format - reservations.json (if someone manually created it)
 	oldPath := filepath.Join(reservationsDir, "reservations.json")
 	newPath := reservationsPath
-	
+
 	oldExists := false
 	newExists := false
 	if _, err := os.Stat(oldPath); err == nil {
@@ -1707,7 +2000,7 @@ func checkReservationsFileMigration(reservationsPath string) {
 	if _, err := os.Stat(newPath); err == nil {
 		newExists = true
 	}
-	
+
 	if oldExists && newExists {
 		// Both exist, warn in yellow
 		fmt.Fprintln(os.Stderr, aurora.Yellow(fmt.Sprintf("WARNING: Both old reservations file (%s) and new reservations file (%s) exist. Using new file.", oldPath, newPath)))
@@ -1765,6 +2058,74 @@ func macEqual(a, b string) bool {
 	return strings.EqualFold(a, b)
 }
 
+// defaultConfigOrdered is used for generating the default config file with specific field ordering.
+// JSON marshaling follows struct field declaration order.
+type defaultConfigOrdered struct {
+	// File paths at the top
+	LeaseDBPath      string                `json:"lease_db_path"`
+	ReservationsPath string                `json:"reservations_path"`
+	Logging          defaultLoggingOrdered `json:"logging"`
+	PIDFile          string                `json:"pid_file"`
+
+	// Core network settings
+	Interface     string   `json:"interface"`
+	ServerIP      string   `json:"server_ip"`
+	SubnetCIDR    string   `json:"subnet_cidr"`
+	Gateway       string   `json:"gateway"`
+	DNS           []string `json:"dns"`
+	Domain        string   `json:"domain"`
+	Authoritative bool     `json:"authoritative"`
+
+	// Lease settings
+	LeaseSeconds       int  `json:"lease_seconds"`
+	LeaseStickySeconds int  `json:"lease_sticky_seconds"`
+	AutoReload         bool `json:"auto_reload"`
+	CompactOnLoad      bool `json:"compact_on_load"`
+
+	// Pools and exclusions
+	Pools      []config.Pool `json:"pools"`
+	Exclusions []string      `json:"exclusions"`
+
+	// Additional options
+	NTP                  []string                         `json:"ntp"`
+	MTU                  int                              `json:"mtu"`
+	TFTPServerName       string                           `json:"tftp_server_name"`
+	BootFileName         string                           `json:"bootfile_name"`
+	WPADURL              string                           `json:"wpad_url"`
+	WINS                 []string                         `json:"wins"`
+	DomainSearch         []string                         `json:"domain_search"`
+	StaticRoutes         []config.StaticRoute             `json:"static_routes"`
+	MirrorRoutesTo249    bool                             `json:"mirror_routes_to_249"`
+	VendorSpecific43Hex  string                           `json:"vendor_specific_43_hex"`
+	DeviceOverrides      map[string]config.DeviceOverride `json:"device_overrides"`
+	VendorClassOverrides map[string]config.DeviceOverride `json:"vendor_class_overrides"`
+	UserClassOverrides77 map[string]config.DeviceOverride `json:"user_class_overrides_77"`
+	Hostname12           string                           `json:"hostname_12"`
+	EnableBroadcast28    bool                             `json:"enable_broadcast_28"`
+	UseClassfulRoutes33  bool                             `json:"use_classful_routes_33"`
+	Routes33             []config.StaticRoute33           `json:"routes_33"`
+	NetBIOSNodeType46    uint8                            `json:"netbios_node_type_46"`
+	NetBIOSScopeID47     string                           `json:"netbios_scope_id_47"`
+	MaxDHCPMessageSize57 uint16                           `json:"max_dhcp_message_size_57"`
+	TFTPServers150       []string                         `json:"tftp_servers_150"`
+	EchoRelayAgentInfo82 bool                             `json:"echo_relay_agent_info_82"`
+	BannedMACs           map[string]config.DeviceMeta     `json:"banned_macs"`
+	EquipmentTypes       []string                         `json:"equipment_types"`
+	ManagementTypes      []string                         `json:"management_types"`
+	ConsoleMaxLines      int                              `json:"console_max_lines"`
+	ConsoleTCPAddress    string                           `json:"console_tcp_address"`
+	DetectDHCPServers    config.DHCPServerDetectionConfig `json:"detect_dhcp_servers"`
+	ARPAnomalyDetection  config.ARPAnomalyDetectionConfig `json:"arp_anomaly_detection"`
+}
+
+type defaultLoggingOrdered struct {
+	LogFile    string `json:"log_file"`
+	MaxSize    int    `json:"max_size"`
+	MaxBackups int    `json:"max_backups"`
+	MaxAge     int    `json:"max_age"`
+	Compress   bool   `json:"compress"`
+}
+
 // ensureDefaultConfig writes a sane default config if cfgPath does not exist.
 func ensureDefaultConfig(cfgPath string) error {
 	_, err := os.Stat(cfgPath)
@@ -1778,71 +2139,79 @@ func ensureDefaultConfig(cfgPath string) error {
 		return err
 	}
 
-	// Default: 192.168.1.0/24
-	def := map[string]any{
-		"interface":                "",
-		"server_ip":                "192.168.1.2",
-		"subnet_cidr":              "192.168.1.0/24",
-		"gateway":                  "192.168.1.1",
-		"compact_on_load":          false,
-		"dns":                      []string{"192.168.1.1", "1.1.1.1"},
-		"domain":                   "lan",
-		"lease_db_path":            "dhcplane.leases",
-		"pid_file":                 "dhcplane.pid",
-		"authoritative":            true, // default authoritative if unset
-		"lease_seconds":            86400, // 24h
-		"lease_sticky_seconds":     86400, // default sticky window
-		"auto_reload":              true,
-		"pools":                    []map[string]string{{"start": "192.168.1.100", "end": "192.168.1.200"}},
-		"exclusions":               []string{"192.168.1.1", "192.168.1.2"},
-		"reservations_path":        "dhcplane.reservations",
-		"ntp":                      []string{},
-		"mtu":                      0,
-		"tftp_server_name":         "", // opt 66
-		"bootfile_name":            "", // opt 67
-		"wpad_url":                 "",
-		"wins":                     []string{},
-		"domain_search":            []string{},
-		"static_routes":            []map[string]string{},
-		"mirror_routes_to_249":     false,
-		"vendor_specific_43_hex":   "", // opt 43 (hex payload)
-		"device_overrides":         map[string]any{},
-		"vendor_class_overrides":   map[string]any{}, // Vendor Class overrides (by option 60 string)
-		"user_class_overrides_77":  map[string]any{},
-		"hostname_12":              "", // suggest hostname (opt 12) when client does not supply one
-		"enable_broadcast_28":      false,
-		"use_classful_routes_33":   false,
-		"routes_33":                []map[string]string{}, // {"destination":"a.b.c.0","gateway":"x.y.z.w"}
-		"netbios_node_type_46":     0,                     // 0 omit, else {1,2,4,8}
-		"netbios_scope_id_47":      "",
-		"max_dhcp_message_size_57": 0,          // 0 omit, else >=576
-		"tftp_servers_150":         []string{}, // list of IPv4s
-		"echo_relay_agent_info_82": false,
-		"banned_macs":              map[string]any{},
-		"equipment_types":          []string{"Switch", "Router", "AP", "Modem", "Gateway"},
-		"management_types":         []string{"ssh", "web", "telnet", "serial", "console"},
-		"console_max_lines":        10000,
-		"console_tcp_address":      "", // empty = UNIX socket; e.g., "0.0.0.0:9090" for TCP
-		"logging": map[string]any{
-			"path":        "",
-			"filename":    "dhcplane.log",
-			"max_size":    20, // MB
-			"max_backups": 5,
-			"max_age":     0,    // days; 0 = no age-based purge
-			"compress":    true, // gzip (lumberjack)
+	// Default: 192.168.1.0/24 with file paths at top
+	def := defaultConfigOrdered{
+		// File paths at the top (defaults to /var/dhcplane/ for data, /var/log/dhcplane/ for logs)
+		LeaseDBPath:      "/var/dhcplane/dhcplane.leases",
+		ReservationsPath: "/var/dhcplane/dhcplane.reservations",
+		Logging: defaultLoggingOrdered{
+			LogFile:    "/var/log/dhcplane/dhcplane.log",
+			MaxSize:    20, // MB
+			MaxBackups: 5,
+			MaxAge:     0,    // days; 0 = no age-based purge
+			Compress:   true, // gzip (lumberjack)
 		},
-		"detect_dhcp_servers": map[string]any{
-			"enabled":           true,
-			"active_probe":      "off",   // off|safe|aggressive
-			"probe_interval":    600,     // seconds
-			"first_scan":        60,      // seconds, default 60
-			"rate_limit":        6,       // events per minute per server
-			"whitelist_servers": []any{}, // IPv4 or MAC entries
+		PIDFile: "/var/dhcplane/dhcplane.pid",
+
+		// Core network settings
+		Interface:     "",
+		ServerIP:      "192.168.1.2",
+		SubnetCIDR:    "192.168.1.0/24",
+		Gateway:       "192.168.1.1",
+		DNS:           []string{"192.168.1.1", "1.1.1.1"},
+		Domain:        "lan",
+		Authoritative: true,
+
+		// Lease settings
+		LeaseSeconds:       86400, // 24h
+		LeaseStickySeconds: 86400, // default sticky window
+		AutoReload:         true,
+		CompactOnLoad:      false,
+
+		// Pools and exclusions
+		Pools:      []config.Pool{{Start: "192.168.1.100", End: "192.168.1.200"}},
+		Exclusions: []string{"192.168.1.1", "192.168.1.2"},
+
+		// Additional options (mostly empty defaults)
+		NTP:                  []string{},
+		MTU:                  0,
+		TFTPServerName:       "",
+		BootFileName:         "",
+		WPADURL:              "",
+		WINS:                 []string{},
+		DomainSearch:         []string{},
+		StaticRoutes:         []config.StaticRoute{},
+		MirrorRoutesTo249:    false,
+		VendorSpecific43Hex:  "",
+		DeviceOverrides:      map[string]config.DeviceOverride{},
+		VendorClassOverrides: map[string]config.DeviceOverride{},
+		UserClassOverrides77: map[string]config.DeviceOverride{},
+		Hostname12:           "",
+		EnableBroadcast28:    false,
+		UseClassfulRoutes33:  false,
+		Routes33:             []config.StaticRoute33{},
+		NetBIOSNodeType46:    0,
+		NetBIOSScopeID47:     "",
+		MaxDHCPMessageSize57: 0,
+		TFTPServers150:       []string{},
+		EchoRelayAgentInfo82: false,
+		BannedMACs:           map[string]config.DeviceMeta{},
+		EquipmentTypes:       []string{"Switch", "Router", "AP", "Modem", "Gateway"},
+		ManagementTypes:      []string{"ssh", "web", "telnet", "serial", "console"},
+		ConsoleMaxLines:      10000,
+		ConsoleTCPAddress:    "",
+		DetectDHCPServers: config.DHCPServerDetectionConfig{
+			Enabled:          true,
+			ActiveProbe:      "off",
+			ProbeInterval:    600,
+			FirstScan:        60,
+			RateLimit:        6,
+			WhitelistServers: []string{},
 		},
-		"arp_anomaly_detection": map[string]any{
-			"enabled":        false,
-			"probe_interval": 1800, // seconds, default 1800
-			"first_scan":     60,   // seconds, default 60
+		ARPAnomalyDetection: config.ARPAnomalyDetectionConfig{
+			Enabled:       false,
+			ProbeInterval: 1800,
+			FirstScan:     60,
 		},
 	}
 

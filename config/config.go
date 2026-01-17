@@ -90,6 +90,13 @@ type StaticRoute33 struct {
 
 // Config represents the DHCP server configuration.
 type Config struct {
+	// File paths - these appear at the top of the config file
+	LeaseDBPath      string        `json:"lease_db_path,omitempty"`      // Path to leases file (dir or file)
+	ReservationsPath string        `json:"reservations_path,omitempty"` // Path to reservations file (dir or file)
+	Logging          LoggingConfig `json:"logging"`                     // Log file settings
+	PIDFile          string        `json:"pid_file,omitempty"`          // Path to PID file
+
+	// Core network settings
 	Interface     string   `json:"interface,omitempty"`
 	ServerIP      string   `json:"server_ip"`
 	SubnetCIDR    string   `json:"subnet_cidr"`
@@ -97,9 +104,6 @@ type Config struct {
 	CompactOnLoad bool     `json:"compact_on_load"`
 	DNS           []string `json:"dns"`
 	Domain        string   `json:"domain,omitempty"`
-	LeaseDBPath     string   `json:"lease_db_path,omitempty"`
-	PIDFile         string   `json:"pid_file,omitempty"`
-	ReservationsPath string   `json:"reservations_path,omitempty"`
 
 	// Authoritative mode: when true, server sends NAKs on invalid requests.
 	// Nil means "unset" and defaults to true.
@@ -156,9 +160,6 @@ type Config struct {
 	// Console TCP address (e.g., "0.0.0.0:9090" or ":9090"); empty = UNIX socket only
 	ConsoleTCPAddress string `json:"console_tcp_address,omitempty"`
 
-	// Log rotation settings
-	Logging LoggingConfig `json:"logging"`
-
 	DetectDHCPServers DHCPServerDetectionConfig `json:"detect_dhcp_servers,omitempty"`
 
 	ARPAnomalyDetection ARPAnomalyDetectionConfig `json:"arp_anomaly_detection,omitempty"`
@@ -183,8 +184,11 @@ type DHCPServerDetectionConfig struct {
 
 // LoggingConfig represents log rotation settings.
 type LoggingConfig struct {
-	Path       string `json:"path,omitempty"`
-	Filename   string `json:"filename,omitempty"`
+	// LogFile is the full path to the log file. If this is set, Path/Filename are ignored.
+	// If it's a directory, "dhcplane.log" is appended.
+	LogFile    string `json:"log_file,omitempty"`
+	Path       string `json:"path,omitempty"`     // Directory for log files (legacy, use log_file instead)
+	Filename   string `json:"filename,omitempty"` // Log filename (legacy, use log_file instead)
 	MaxSize    int    `json:"max_size,omitempty"` // megabytes
 	MaxBackups int    `json:"max_backups,omitempty"`
 	MaxAge     int    `json:"max_age,omitempty"` // days
@@ -278,7 +282,7 @@ func ParseStrict(path string) (Config, Reservations, string, *JSONErr) {
 	if err != nil {
 		return cfg, nil, "", &JSONErr{Err: err}
 	}
-	
+
 	// Check for old format with reservations in config file
 	var rawMap map[string]interface{}
 	if err := json.Unmarshal(data, &rawMap); err == nil {
@@ -293,16 +297,16 @@ func ParseStrict(path string) (Config, Reservations, string, *JSONErr) {
 					if pathRaw, ok := rawMap["reservations_path"].(string); ok && pathRaw != "" {
 						reservationsPath = pathRaw
 					}
-					cfgDir := filepath.Dir(path)
 					if reservationsPath == "" {
-						reservationsPath = filepath.Join(cfgDir, "dhcplane.reservations")
+						reservationsPath = "/var/dhcplane/dhcplane.reservations"
 					} else if !filepath.IsAbs(reservationsPath) {
+						cfgDir := filepath.Dir(path)
 						reservationsPath = filepath.Join(cfgDir, reservationsPath)
 					}
-					
+
 					// Load existing reservations (if any)
 					existingReservations, _ := LoadReservations(reservationsPath)
-					
+
 					// Merge old reservations with existing ones (existing take precedence)
 					mergedReservations := make(Reservations)
 					for k, v := range oldReservations {
@@ -311,7 +315,7 @@ func ParseStrict(path string) (Config, Reservations, string, *JSONErr) {
 					for k, v := range existingReservations {
 						mergedReservations[k] = v // Existing reservations override migrated ones
 					}
-					
+
 					// Save merged reservations
 					if err := SaveReservations(reservationsPath, mergedReservations); err == nil {
 						// Remove reservations from config and save cleaned config
@@ -331,7 +335,7 @@ func ParseStrict(path string) (Config, Reservations, string, *JSONErr) {
 			}
 		}
 	}
-	
+
 	dec := json.NewDecoder(strings.NewReader(string(data)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
@@ -355,26 +359,63 @@ func ParseStrict(path string) (Config, Reservations, string, *JSONErr) {
 	if len(cfg.Pools) == 0 {
 		return cfg, nil, "", &JSONErr{Err: errors.New("config: at least one pool required")}
 	}
-	
+
 	// Load reservations from separate file
 	reservationsPath := cfg.ReservationsPath
 	if reservationsPath == "" {
-		// Default to same directory as config file
-		cfgDir := filepath.Dir(path)
-		reservationsPath = filepath.Join(cfgDir, "dhcplane.reservations")
+		// Default to /var/dhcplane/
+		reservationsPath = "/var/dhcplane/dhcplane.reservations"
 	} else if !filepath.IsAbs(reservationsPath) {
 		// Relative path: resolve relative to config file directory
 		cfgDir := filepath.Dir(path)
 		reservationsPath = filepath.Join(cfgDir, reservationsPath)
 	}
-	
+
 	reservations, err := LoadReservations(reservationsPath)
 	if err != nil {
 		return cfg, nil, "", &JSONErr{Err: fmt.Errorf("load reservations: %w", err)}
 	}
 	cfg.ReservationsPath = reservationsPath // Store resolved path
-	
+
 	return cfg, reservations, reservationsPath, nil
+}
+
+/* ----------------- Path resolution helpers ----------------- */
+
+// ResolveFilePath resolves a path that may be a directory or file.
+// If the path is a directory (or ends with /), the defaultFilename is appended.
+// If the path is a file, it's returned as-is.
+// If the path is empty, the defaultFilename is returned.
+// If basePath is provided and path is relative, it's resolved relative to basePath.
+func ResolveFilePath(path, defaultFilename, basePath string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		if basePath != "" {
+			return filepath.Join(basePath, defaultFilename)
+		}
+		return defaultFilename
+	}
+
+	// Check if path ends with a separator (explicit directory)
+	if strings.HasSuffix(path, string(filepath.Separator)) || strings.HasSuffix(path, "/") {
+		path = filepath.Join(path, defaultFilename)
+	} else {
+		// Check if it's an existing directory
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			path = filepath.Join(path, defaultFilename)
+		}
+		// If file doesn't exist, check if the path looks like a directory
+		// (no extension and no filename-like pattern)
+		// But we'll leave this to the user - if they specify a path without
+		// a clear file extension, we'll use it as the filename
+	}
+
+	// Make relative paths absolute if basePath is provided
+	if basePath != "" && !filepath.IsAbs(path) {
+		path = filepath.Join(basePath, path)
+	}
+
+	return path
 }
 
 /* ----------------- Small helpers (package-local) ----------------- */
@@ -544,20 +585,55 @@ func ValidateAndNormalizeConfig(cfg Config) (Config, []string, error) {
 		}
 	}
 
-	// Logging defaults and validation
-	c.LeaseDBPath = strings.TrimSpace(c.LeaseDBPath)
+	// Default paths for data files
+	const (
+		defaultDataDir = "/var/dhcplane"
+		defaultLogDir  = "/var/log/dhcplane"
+	)
+
+	// File paths defaults and validation
+	// LeaseDBPath: resolve directory to file if needed, default to /var/dhcplane/
 	if c.LeaseDBPath == "" {
-		c.LeaseDBPath = "dhcplane.leases"
+		c.LeaseDBPath = ResolveFilePath(defaultDataDir, "dhcplane.leases", "")
+	} else {
+		c.LeaseDBPath = ResolveFilePath(c.LeaseDBPath, "dhcplane.leases", "")
 	}
-	c.PIDFile = strings.TrimSpace(c.PIDFile)
+
+	// PIDFile: resolve directory to file if needed, default to /var/dhcplane/
 	if c.PIDFile == "" {
-		c.PIDFile = "dhcplane.pid"
+		c.PIDFile = ResolveFilePath(defaultDataDir, "dhcplane.pid", "")
+	} else {
+		c.PIDFile = ResolveFilePath(c.PIDFile, "dhcplane.pid", "")
 	}
+
+	// ReservationsPath: resolve directory to file if needed, default to /var/dhcplane/
+	if c.ReservationsPath == "" {
+		c.ReservationsPath = ResolveFilePath(defaultDataDir, "dhcplane.reservations", "")
+	} else {
+		c.ReservationsPath = ResolveFilePath(c.ReservationsPath, "dhcplane.reservations", "")
+	}
+
+	// Logging: support both new log_file field and legacy path/filename
+	c.Logging.LogFile = strings.TrimSpace(c.Logging.LogFile)
 	c.Logging.Path = strings.TrimSpace(c.Logging.Path)
 	c.Logging.Filename = strings.TrimSpace(c.Logging.Filename)
-	if c.Logging.Filename == "" {
-		c.Logging.Filename = "dhcplane.log"
+
+	if c.Logging.LogFile != "" {
+		// New style: single log_file path (may be dir or file)
+		c.Logging.LogFile = ResolveFilePath(c.Logging.LogFile, "dhcplane.log", "")
+		// Clear legacy fields to avoid confusion
+		c.Logging.Path = ""
+		c.Logging.Filename = ""
+	} else if c.Logging.Path != "" || c.Logging.Filename != "" {
+		// Legacy style: separate path and filename
+		if c.Logging.Filename == "" {
+			c.Logging.Filename = "dhcplane.log"
+		}
+	} else {
+		// No logging config at all - use default /var/log/dhcplane/
+		c.Logging.LogFile = ResolveFilePath(defaultLogDir, "dhcplane.log", "")
 	}
+
 	if c.Logging.MaxSize <= 0 {
 		c.Logging.MaxSize = 20
 	}
