@@ -43,3 +43,5 @@ dhcplane.exe
 *.log.gz
 .trunk/
 builds/
+dhcplane.leases
+dhcplane.reservations
