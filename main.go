@@ -31,7 +31,7 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-var appVersion = "0.1.55"
+var appVersion = "0.1.67"
 
 func buildConsoleConfig(maxLines int) planeconsole.Config {
 	if maxLines <= 0 {
