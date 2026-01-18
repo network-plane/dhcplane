@@ -2413,7 +2413,7 @@ func writeFullConfig(cfgPath string) error {
 func generateSystemdUnit(exePath, cfgPath, user, group string) string {
 	return fmt.Sprintf(`[Unit]
 Description=DHCPlane DHCP Server
-Documentation=https://github.com/earentir/dhcplane
+Documentation=https://github.com/network-plane/dhcplane
 After=network-online.target
 Wants=network-online.target
 
