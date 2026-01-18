@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -1693,7 +1694,121 @@ func main() {
 		},
 	}
 
-	root.AddCommand(serveCmd, showCmd, statsCmd, checkCmd, reloadCmd, manageCmd, arpCmd, searchCmd)
+	/* ---- init ---- */
+	initCmd := &cobra.Command{
+		Use:   "init",
+		Short: "Initialize config files or systemd service",
+		Long:  `Initialize dhcplane by generating config files or systemd service units.`,
+	}
+
+	// init config subcommand
+	var initConfigFull bool
+	var initConfigForce bool
+	initConfigCmd := &cobra.Command{
+		Use:   "config",
+		Short: "Generate a config file (use --full for all options)",
+		Long: `Generate a config file. By default creates a minimal config with just the essentials.
+Use --full to generate a complete config with all available options and examples.`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			// Check if file exists
+			if _, err := os.Stat(cfgPath); err == nil {
+				if !initConfigForce {
+					return fmt.Errorf("config file %s already exists (use --force to overwrite)", cfgPath)
+				}
+				fmt.Fprintf(os.Stderr, "%s\n", aurora.Yellow(fmt.Sprintf("WARNING: Overwriting existing config file: %s", cfgPath)))
+			}
+
+			var err error
+			if initConfigFull {
+				err = writeFullConfig(cfgPath)
+				if err == nil {
+					fmt.Printf("Generated full config file: %s\n", cfgPath)
+					fmt.Println("This config contains ALL available options with example values.")
+					fmt.Println("Edit the file to customize for your network.")
+				}
+			} else {
+				err = writeMinimalConfig(cfgPath)
+				if err == nil {
+					fmt.Printf("Generated minimal config file: %s\n", cfgPath)
+					fmt.Println("This config contains only the essential settings.")
+					fmt.Println("Use 'dhcplane init config --full' to generate a config with all options.")
+				}
+			}
+			return err
+		},
+	}
+	initConfigCmd.Flags().BoolVar(&initConfigFull, "full", false, "Generate a complete config with all available options")
+	initConfigCmd.Flags().BoolVar(&initConfigForce, "force", false, "Overwrite existing config file")
+
+	// init systemd subcommand
+	var systemdDeploy bool
+	var systemdUser string
+	var systemdGroup string
+	initSystemdCmd := &cobra.Command{
+		Use:   "systemd",
+		Short: "Generate a systemd service file",
+		Long: `Generate a systemd service file for dhcplane.
+Use --deploy to install it to /etc/systemd/system/ and reload the daemon.`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			// Get absolute path to the binary
+			exePath, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("cannot determine executable path: %w", err)
+			}
+			exePath, err = filepath.Abs(exePath)
+			if err != nil {
+				return fmt.Errorf("cannot get absolute path: %w", err)
+			}
+
+			// Get absolute path to config file
+			cfgAbsPath, err := filepath.Abs(cfgPath)
+			if err != nil {
+				return fmt.Errorf("cannot get absolute config path: %w", err)
+			}
+
+			// Generate systemd unit content
+			unitContent := generateSystemdUnit(exePath, cfgAbsPath, systemdUser, systemdGroup)
+
+			if systemdDeploy {
+				// Deploy to /etc/systemd/system/
+				unitPath := "/etc/systemd/system/dhcplane.service"
+				if err := os.WriteFile(unitPath, []byte(unitContent), 0o644); err != nil {
+					return fmt.Errorf("cannot write %s: %w (try running with sudo)", unitPath, err)
+				}
+				fmt.Printf("Installed systemd service: %s\n", unitPath)
+
+				// Reload systemd daemon
+				fmt.Println("Reloading systemd daemon...")
+				cmd := exec.Command("systemctl", "daemon-reload")
+				if output, err := cmd.CombinedOutput(); err != nil {
+					return fmt.Errorf("systemctl daemon-reload failed: %w\n%s", err, output)
+				}
+				fmt.Println("Systemd daemon reloaded successfully.")
+				fmt.Println("")
+				fmt.Println("To enable and start the service:")
+				fmt.Println("  sudo systemctl enable dhcplane")
+				fmt.Println("  sudo systemctl start dhcplane")
+				fmt.Println("")
+				fmt.Println("To check status:")
+				fmt.Println("  sudo systemctl status dhcplane")
+			} else {
+				// Just print the unit file
+				fmt.Println("# Generated systemd unit file for dhcplane")
+				fmt.Println("# Save this to /etc/systemd/system/dhcplane.service")
+				fmt.Println("# Or run: dhcplane init systemd --deploy")
+				fmt.Println("")
+				fmt.Print(unitContent)
+			}
+			return nil
+		},
+	}
+	initSystemdCmd.Flags().BoolVar(&systemdDeploy, "deploy", false, "Install to /etc/systemd/system/ and reload daemon")
+	initSystemdCmd.Flags().StringVar(&systemdUser, "user", "root", "User to run the service as")
+	initSystemdCmd.Flags().StringVar(&systemdGroup, "group", "root", "Group to run the service as")
+
+	initCmd.AddCommand(initConfigCmd, initSystemdCmd)
+
+	root.AddCommand(serveCmd, showCmd, statsCmd, checkCmd, reloadCmd, manageCmd, arpCmd, searchCmd, initCmd)
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, aurora.Red(fmt.Sprintf("ERROR: %v", err)))
 		os.Exit(1)
@@ -2058,9 +2173,32 @@ func macEqual(a, b string) bool {
 	return strings.EqualFold(a, b)
 }
 
-// defaultConfigOrdered is used for generating the default config file with specific field ordering.
+// minimalConfigOrdered is used for generating a simple default config file.
+// This contains only the essential settings needed to get started.
+type minimalConfigOrdered struct {
+	// File paths at the top
+	LeaseDBPath      string                `json:"lease_db_path"`
+	ReservationsPath string                `json:"reservations_path"`
+	Logging          defaultLoggingOrdered `json:"logging"`
+	PIDFile          string                `json:"pid_file"`
+
+	// Core network settings
+	Interface  string   `json:"interface"`
+	ServerIP   string   `json:"server_ip"`
+	SubnetCIDR string   `json:"subnet_cidr"`
+	Gateway    string   `json:"gateway"`
+	DNS        []string `json:"dns"`
+
+	// Lease settings
+	LeaseSeconds int `json:"lease_seconds"`
+
+	// Pools
+	Pools []config.Pool `json:"pools"`
+}
+
+// fullConfigOrdered is used for generating a complete config file with ALL options.
 // JSON marshaling follows struct field declaration order.
-type defaultConfigOrdered struct {
+type fullConfigOrdered struct {
 	// File paths at the top
 	LeaseDBPath      string                `json:"lease_db_path"`
 	ReservationsPath string                `json:"reservations_path"`
@@ -2126,7 +2264,7 @@ type defaultLoggingOrdered struct {
 	Compress   bool   `json:"compress"`
 }
 
-// ensureDefaultConfig writes a sane default config if cfgPath does not exist.
+// ensureDefaultConfig writes a minimal default config if cfgPath does not exist.
 func ensureDefaultConfig(cfgPath string) error {
 	_, err := os.Stat(cfgPath)
 	if err == nil {
@@ -2135,36 +2273,75 @@ func ensureDefaultConfig(cfgPath string) error {
 	if !os.IsNotExist(err) {
 		return err
 	}
+	return writeMinimalConfig(cfgPath)
+}
+
+// writeMinimalConfig writes a minimal, easy-to-use default config.
+func writeMinimalConfig(cfgPath string) error {
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil && !os.IsExist(err) {
 		return err
 	}
 
-	// Default: 192.168.1.0/24 with file paths at top
-	def := defaultConfigOrdered{
-		// File paths at the top (defaults to /var/dhcplane/ for data, /var/log/dhcplane/ for logs)
-		LeaseDBPath:      "/var/dhcplane/dhcplane.leases",
-		ReservationsPath: "/var/dhcplane/dhcplane.reservations",
+	// Minimal config with just the essentials
+	def := minimalConfigOrdered{
+		// File paths - use current directory for simplicity
+		LeaseDBPath:      "./dhcplane.leases",
+		ReservationsPath: "./dhcplane.reservations",
 		Logging: defaultLoggingOrdered{
-			LogFile:    "/var/log/dhcplane/dhcplane.log",
-			MaxSize:    20, // MB
+			LogFile:    "./dhcplane.log",
+			MaxSize:    20,
 			MaxBackups: 5,
-			MaxAge:     0,    // days; 0 = no age-based purge
-			Compress:   true, // gzip (lumberjack)
+			MaxAge:     0,
+			Compress:   true,
 		},
-		PIDFile: "/var/dhcplane/dhcplane.pid",
+		PIDFile: "./dhcplane.pid",
+
+		// Core network settings - typical home/small office network
+		Interface:    "",
+		ServerIP:     "192.168.1.2",
+		SubnetCIDR:   "192.168.1.0/24",
+		Gateway:      "192.168.1.1",
+		DNS:          []string{"1.1.1.1", "1.0.0.1"},
+		LeaseSeconds: 86400, // 24h
+		Pools:        []config.Pool{{Start: "192.168.1.100", End: "192.168.1.200"}},
+	}
+
+	b, _ := json.MarshalIndent(def, "", "  ")
+	return os.WriteFile(cfgPath, b, 0o644)
+}
+
+// writeFullConfig writes a complete config with all available options.
+func writeFullConfig(cfgPath string) error {
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil && !os.IsExist(err) {
+		return err
+	}
+
+	// Full config with all options
+	def := fullConfigOrdered{
+		// File paths - use current directory
+		LeaseDBPath:      "./dhcplane.leases",
+		ReservationsPath: "./dhcplane.reservations",
+		Logging: defaultLoggingOrdered{
+			LogFile:    "./dhcplane.log",
+			MaxSize:    20,
+			MaxBackups: 5,
+			MaxAge:     0,
+			Compress:   true,
+		},
+		PIDFile: "./dhcplane.pid",
 
 		// Core network settings
 		Interface:     "",
 		ServerIP:      "192.168.1.2",
 		SubnetCIDR:    "192.168.1.0/24",
 		Gateway:       "192.168.1.1",
-		DNS:           []string{"192.168.1.1", "1.1.1.1"},
+		DNS:           []string{"1.1.1.1", "1.0.0.1"},
 		Domain:        "lan",
 		Authoritative: true,
 
 		// Lease settings
-		LeaseSeconds:       86400, // 24h
-		LeaseStickySeconds: 86400, // default sticky window
+		LeaseSeconds:       86400,
+		LeaseStickySeconds: 86400,
 		AutoReload:         true,
 		CompactOnLoad:      false,
 
@@ -2172,19 +2349,30 @@ func ensureDefaultConfig(cfgPath string) error {
 		Pools:      []config.Pool{{Start: "192.168.1.100", End: "192.168.1.200"}},
 		Exclusions: []string{"192.168.1.1", "192.168.1.2"},
 
-		// Additional options (mostly empty defaults)
-		NTP:                  []string{},
-		MTU:                  0,
-		TFTPServerName:       "",
-		BootFileName:         "",
-		WPADURL:              "",
-		WINS:                 []string{},
-		DomainSearch:         []string{},
-		StaticRoutes:         []config.StaticRoute{},
-		MirrorRoutesTo249:    false,
-		VendorSpecific43Hex:  "",
-		DeviceOverrides:      map[string]config.DeviceOverride{},
-		VendorClassOverrides: map[string]config.DeviceOverride{},
+		// Additional options with example values
+		NTP:                 []string{},
+		MTU:                 1500,
+		TFTPServerName:      "",
+		BootFileName:        "",
+		WPADURL:             "",
+		WINS:                []string{},
+		DomainSearch:        []string{},
+		StaticRoutes:        []config.StaticRoute{},
+		MirrorRoutesTo249:   false,
+		VendorSpecific43Hex: "",
+		DeviceOverrides: map[string]config.DeviceOverride{
+			"aa:bb:cc:dd:ee:ff": {
+				DNS:            []string{"192.168.1.53"},
+				TFTPServerName: "tftp.example.com",
+				BootFileName:   "pxelinux.0",
+			},
+		},
+		VendorClassOverrides: map[string]config.DeviceOverride{
+			"PXEClient": {
+				TFTPServerName: "tftp.example.com",
+				BootFileName:   "pxelinux.0",
+			},
+		},
 		UserClassOverrides77: map[string]config.DeviceOverride{},
 		Hostname12:           "",
 		EnableBroadcast28:    false,
@@ -2192,24 +2380,24 @@ func ensureDefaultConfig(cfgPath string) error {
 		Routes33:             []config.StaticRoute33{},
 		NetBIOSNodeType46:    0,
 		NetBIOSScopeID47:     "",
-		MaxDHCPMessageSize57: 0,
+		MaxDHCPMessageSize57: 1500,
 		TFTPServers150:       []string{},
 		EchoRelayAgentInfo82: false,
 		BannedMACs:           map[string]config.DeviceMeta{},
-		EquipmentTypes:       []string{"Switch", "Router", "AP", "Modem", "Gateway"},
+		EquipmentTypes:       []string{"Switch", "Router", "AP", "Modem", "Gateway", "Appliance", "Camera", "Sensor"},
 		ManagementTypes:      []string{"ssh", "web", "telnet", "serial", "console"},
 		ConsoleMaxLines:      10000,
 		ConsoleTCPAddress:    "",
 		DetectDHCPServers: config.DHCPServerDetectionConfig{
 			Enabled:          true,
-			ActiveProbe:      "off",
+			ActiveProbe:      "safe",
 			ProbeInterval:    600,
 			FirstScan:        60,
 			RateLimit:        6,
 			WhitelistServers: []string{},
 		},
 		ARPAnomalyDetection: config.ARPAnomalyDetectionConfig{
-			Enabled:       false,
+			Enabled:       true,
 			ProbeInterval: 1800,
 			FirstScan:     60,
 		},
@@ -2217,6 +2405,45 @@ func ensureDefaultConfig(cfgPath string) error {
 
 	b, _ := json.MarshalIndent(def, "", "  ")
 	return os.WriteFile(cfgPath, b, 0o644)
+}
+
+/* ----------------- Systemd unit generation ----------------- */
+
+// generateSystemdUnit creates a systemd service unit file content.
+func generateSystemdUnit(exePath, cfgPath, user, group string) string {
+	return fmt.Sprintf(`[Unit]
+Description=DHCPlane DHCP Server
+Documentation=https://github.com/earentir/dhcplane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%s
+Group=%s
+ExecStart=%s --config %s serve
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+# Allow binding to privileged ports
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN
+
+# Allow writing to data directories
+ReadWritePaths=/var/dhcplane /var/log/dhcplane
+
+[Install]
+WantedBy=multi-user.target
+`, user, group, exePath, cfgPath)
 }
 
 /* ----------------- Local type needed for bind closer ----------------- */
