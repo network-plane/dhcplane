@@ -68,7 +68,7 @@ func (db *LeaseDB) Load() error {
 		}
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// First try the canonical struct shape.
 	type fileShape struct {

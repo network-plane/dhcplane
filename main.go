@@ -107,7 +107,7 @@ func (ml *multiListener) acceptLoop(ln net.Listener) {
 		select {
 		case ml.connCh <- conn:
 		case <-ml.closeCh:
-			conn.Close()
+			_ = conn.Close()
 			return
 		}
 	}
@@ -179,7 +179,7 @@ func buildConsoleBroker(maxLines int, tcpAddr string) (*planeconsole.Broker, str
 			if err != nil {
 				// Close any UNIX listener we created
 				for _, ln := range listeners {
-					ln.Close()
+					_ = ln.Close()
 				}
 				return "", nil, fmt.Errorf("tcp listen %s: %w", tcpAddr, err)
 			}
@@ -453,8 +453,8 @@ func checkWritable(path string, isDir bool) error {
 		if err != nil {
 			return fmt.Errorf("cannot write to directory: %w", err)
 		}
-		f.Close()
-		os.Remove(testFile)
+		_ = f.Close()
+		_ = os.Remove(testFile)
 		return nil
 	}
 
@@ -463,7 +463,7 @@ func checkWritable(path string, isDir bool) error {
 	if err != nil {
 		return fmt.Errorf("cannot open for writing: %w", err)
 	}
-	f.Close()
+	_ = f.Close()
 	return nil
 }
 
@@ -473,10 +473,10 @@ func checkCanCreateFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("cannot create file: %w", err)
 	}
-	f.Close()
+	_ = f.Close()
 	// Remove the test file - we just wanted to check we can create it
 	// Note: For actual data files, they'll be created by their respective handlers
-	os.Remove(path)
+	_ = os.Remove(path)
 	return nil
 }
 
@@ -642,9 +642,9 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 		// Color warnings in console output (but not in logs)
 		lowerMsg := strings.ToLower(msg)
 		if strings.Contains(lowerMsg, "warning:") || strings.Contains(lowerMsg, "warn:") {
-			fmt.Fprintln(os.Stdout, aurora.Yellow(msg))
+			_, _ = fmt.Fprintln(os.Stdout, aurora.Yellow(msg))
 		} else {
-			fmt.Fprintln(os.Stdout, msg)
+			_, _ = fmt.Fprintln(os.Stdout, msg)
 		}
 	}
 	errorSink := func(format string, args ...any) {
@@ -1253,12 +1253,12 @@ func main() {
 
 			// tabular default
 			w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
-			fmt.Fprintln(w, "IP\tMAC\tHostname\tAllocatedAt\tExpiry\tFirstSeen")
+			_, _ = fmt.Fprintln(w, "IP\tMAC\tHostname\tAllocatedAt\tExpiry\tFirstSeen")
 			for _, r := range rows {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 					r.IP, r.MAC, r.Hostname, r.AllocatedAt, r.Expiry, r.FirstSeen)
 			}
-			w.Flush()
+			_ = w.Flush()
 			return nil
 		},
 	}
@@ -1890,10 +1890,10 @@ func triggerDHCPServerScan(
 		errf("DHCP server detection: failed to listen on UDP 68: %v", err)
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Set read deadline
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 
 	// Send DISCOVER
 	var destAddr *net.UDPAddr
@@ -1931,7 +1931,7 @@ func triggerDHCPServerScan(
 	seenServers := make(map[string]bool)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		buf := make([]byte, 1500)
 		n, peer, err := conn.ReadFrom(buf)
 		if err != nil {

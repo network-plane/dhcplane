@@ -262,7 +262,7 @@ func SaveReservations(path string, reservations Reservations) error {
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(&reservations); err != nil {
-		f.Close()
+		_ = f.Close()
 		_ = os.Remove(tmp)
 		return err
 	}

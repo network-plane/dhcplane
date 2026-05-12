@@ -3,7 +3,6 @@ package arp
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"net"
 	"os/exec"
@@ -65,9 +64,9 @@ func ScanForCLI(cfg config.Config, reservations config.Reservations, leasePath, 
 // PrintTable renders a plain table and legend to stdout.
 func PrintTable(rows []Entry) {
 	w := tabwriter.NewWriter(stdoutWriter{}, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "IP\tMAC\tIFACE\tSOURCE\tSTATE\tNOTE")
+	_, _ = fmt.Fprintln(w, "IP\tMAC\tIFACE\tSOURCE\tSTATE\tNOTE")
 	for _, r := range rows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", r.IP, r.MAC, r.Iface, r.Source, r.State, r.Note)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", r.IP, r.MAC, r.Iface, r.Source, r.State, r.Note)
 	}
 	_ = w.Flush()
 
@@ -178,11 +177,9 @@ func gather(cfg *config.Config, reservations config.Reservations, db *dhcpserver
 					Found: "arp", Reserved: true, Leased: isLeased, Excluded: isExcluded,
 				})
 				note = "mismatch"
-			} else if !leaseExpired {
-				// Reserved and MAC matches, and lease not expired - no anomaly
-				// (If lease is expired but reserved MAC matches, that's also fine)
 			}
 			// If reserved and MAC matches, no anomaly - skip further checks
+			// (Whether the lease is expired or not, a matching reserved MAC is fine.)
 		} else {
 			// Not reserved - check for anomalies
 			if !isLeased {
@@ -529,6 +526,3 @@ func macEqual(a, b string) bool {
 type stdoutWriter struct{}
 
 func (stdoutWriter) Write(p []byte) (int, error) { return fmt.Print(string(p)) }
-
-// pretty JSON helpers for debugging (unused, kept for future)
-func _dumpJSON(v any) { b, _ := json.MarshalIndent(v, "", "  "); fmt.Println(string(b)) }
