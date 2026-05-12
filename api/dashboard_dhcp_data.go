@@ -6,6 +6,8 @@ package api
 import (
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -33,6 +35,45 @@ func effectiveAuthoritative(cfg *config.Config) bool {
 	return *cfg.Authoritative
 }
 
+// consoleSocketPrimaryHint returns the first UNIX socket path the console tries to bind
+// (aligned with main.consoleSocketCandidates).
+func consoleSocketPrimaryHint() string {
+	candidates := []string{
+		"/run/dhcplane/consoleui.sock",
+		"/tmp/consoleui.sock",
+	}
+	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
+		candidates = append(candidates, filepath.Join(xdg, "dhcplane.sock"))
+	}
+	if len(candidates) == 0 {
+		return "—"
+	}
+	return candidates[0]
+}
+
+func buildDHCStatusListeners(cfg *config.Config) map[string]any {
+	if cfg == nil {
+		return map[string]any{}
+	}
+	out := map[string]any{
+		"dhcp_port":     "67 / 68",
+		"api_enabled":   cfg.API,
+		"api_tls":       cfg.APITLSCertFile != "" && cfg.APITLSKeyFile != "",
+		"client_socket": consoleSocketPrimaryHint(),
+		"client_tcp":    strings.TrimSpace(cfg.ConsoleTCPAddress),
+	}
+	if cfg.API && strings.TrimSpace(cfg.APIPort) != "" {
+		out["api_port"] = strings.TrimSpace(cfg.APIPort)
+		out["api_bind"] = strings.TrimSpace(cfg.APIBind)
+		out["api_address"] = formatDashboardAPIAddr(cfg)
+	} else {
+		out["api_port"] = "—"
+		out["api_bind"] = ""
+		out["api_address"] = "—"
+	}
+	return out
+}
+
 // buildDHCPDashboardPayload returns JSON for GET /stats/dashboard/data and WebSocket pushes.
 func buildDHCPDashboardPayload(d *Deps) map[string]any {
 	if d == nil {
@@ -44,21 +85,14 @@ func buildDHCPDashboardPayload(d *Deps) map[string]any {
 	}
 	dhcpUp := d.DHCPServing != nil && d.DHCPServing()
 	ready := dhcpUp
+	apiUp := Running()
 
 	status := map[string]any{
 		"ready":     ready,
 		"dhcp_up":   dhcpUp,
-		"api_up":    true,
-		"listeners": map[string]any{},
-	}
-	if cfg.API && strings.TrimSpace(cfg.APIPort) != "" {
-		addr := formatDashboardAPIAddr(cfg)
-		status["listeners"] = map[string]any{
-			"api_port":    strings.TrimSpace(cfg.APIPort),
-			"api_bind":    strings.TrimSpace(cfg.APIBind),
-			"api_address": addr,
-			"api_tls":     cfg.APITLSCertFile != "" && cfg.APITLSKeyFile != "",
-		}
+		"api_up":    apiUp,
+		"listeners": buildDHCStatusListeners(cfg),
+		"features":  buildDHCPDashboardStatusFeatures(cfg),
 	}
 
 	dhcpBlock := map[string]any{
@@ -127,6 +161,7 @@ func buildDHCPDashboardPayload(d *Deps) map[string]any {
 	isDeclined := func(ip string) bool { return d.DB.IsDeclined(ip) }
 
 	perMinute, perHour, perDay, perWeek, perMonth := statistics.CountAllocations(iter, assume, now)
+	allocEvents1h := statistics.ListAllocationEventsInWindow(iter, assume, now, time.Hour, statistics.MaxDashboardAllocationEvents)
 	curr, expiring, expired := statistics.ClassifyLeases(iter, assume, now)
 
 	payload["counters"] = map[string]any{
@@ -144,6 +179,8 @@ func buildDHCPDashboardPayload(d *Deps) map[string]any {
 		"expiring": expiring,
 		"expired":  expired,
 	}
+	payload["allocation_events_1h"] = allocEvents1h
+	payload["server_now_unix"] = now.Unix()
 
 	var previews []leasePreviewRow
 	d.DB.ForEach(func(l dhcpserver.Lease) {

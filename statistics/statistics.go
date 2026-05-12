@@ -80,6 +80,43 @@ func CountAllocations(iter LeaseIter, assumeLeaseDur time.Duration, now time.Tim
 	return
 }
 
+// MaxDashboardAllocationEvents caps allocation_events_1h JSON for the HTML dashboard.
+const MaxDashboardAllocationEvents = 2000
+
+// AllocationEvent is one inferred allocation instant (same deriveAllocEpoch rules as CountAllocations).
+type AllocationEvent struct {
+	At  int64  `json:"at"` // unix seconds
+	IP  string `json:"ip,omitempty"`
+	MAC string `json:"mac,omitempty"`
+}
+
+// ListAllocationEventsInWindow returns allocation events in (now-window, now], sorted by At then IP.
+// If more than maxN events match, the oldest are dropped so the slice keeps the maxN most recent.
+func ListAllocationEventsInWindow(iter LeaseIter, assumeLeaseDur time.Duration, now time.Time, window time.Duration, maxN int) []AllocationEvent {
+	if maxN <= 0 {
+		maxN = MaxDashboardAllocationEvents
+	}
+	n := now.Unix()
+	w := n - int64(window.Seconds())
+	var ev []AllocationEvent
+	iter(func(l LeaseLite) {
+		alloc := deriveAllocEpoch(l.AllocatedAt, l.Expiry, assumeLeaseDur, n)
+		if alloc > w {
+			ev = append(ev, AllocationEvent{At: alloc, IP: l.IP, MAC: l.MAC})
+		}
+	})
+	sort.Slice(ev, func(i, j int) bool {
+		if ev[i].At != ev[j].At {
+			return ev[i].At < ev[j].At
+		}
+		return ev[i].IP < ev[j].IP
+	})
+	if len(ev) > maxN {
+		ev = ev[len(ev)-maxN:]
+	}
+	return ev
+}
+
 // ClassifyLeases splits leases into current, expiring (<= last 1/8), and expired.
 // Sorting matches the original behavior: current/expiring by Expiry asc, expired by Expiry desc.
 func ClassifyLeases(iter LeaseIter, assumeLeaseDur time.Duration, now time.Time) (curr, expiring, expired []LeaseView) {

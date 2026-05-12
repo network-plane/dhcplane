@@ -4,7 +4,6 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -148,7 +147,7 @@ func dashboardWebSocketHandler(w http.ResponseWriter, r *http.Request, d *Deps) 
 	defer ticker.Stop()
 	defer pingTicker.Stop()
 
-	var lastCombined []byte
+	var lastPushKey string
 
 	for {
 		select {
@@ -167,15 +166,17 @@ func dashboardWebSocketHandler(w http.ResponseWriter, r *http.Request, d *Deps) 
 			if cfg := d.Cfg(); cfg == nil || !cfg.StatsDashboardHTMLEnabled() {
 				continue
 			}
-			env := map[string]any{"v": 1, "dashboard": buildDHCPDashboardPayload(d)}
+			payload := buildDHCPDashboardPayload(d)
+			key := dhcpDashboardWSPushFingerprint(payload)
+			if key == lastPushKey {
+				continue
+			}
+			lastPushKey = key
+			env := map[string]any{"v": 1, "dashboard": payload}
 			b, err := json.Marshal(env)
 			if err != nil {
 				continue
 			}
-			if bytes.Equal(b, lastCombined) {
-				continue
-			}
-			lastCombined = append(lastCombined[:0], b...)
 
 			_ = conn.SetWriteDeadline(time.Now().Add(dashboardWSWriteDeadline))
 			if err := conn.WriteMessage(websocket.TextMessage, b); err != nil {
