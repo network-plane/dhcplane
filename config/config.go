@@ -160,6 +160,16 @@ type Config struct {
 	// Console TCP address (e.g., "0.0.0.0:9090" or ":9090"); empty = UNIX socket only
 	ConsoleTCPAddress string `json:"console_tcp_address,omitempty"`
 
+	// REST API (optional; off by default). JSON keys align with dnsplane.
+	API                  bool    `json:"api,omitempty"`
+	APIPort              string  `json:"apiport,omitempty"`
+	APIBind              string  `json:"api_bind,omitempty"`
+	APIAuthToken         string  `json:"api_auth_token,omitempty"`
+	APITLSCertFile       string  `json:"api_tls_cert,omitempty"`
+	APITLSKeyFile        string  `json:"api_tls_key,omitempty"`
+	APIRateLimitPerIP    float64 `json:"api_rate_limit_rps,omitempty"`
+	APIRateLimitBurst    int     `json:"api_rate_limit_burst,omitempty"`
+
 	DetectDHCPServers DHCPServerDetectionConfig `json:"detect_dhcp_servers,omitempty"`
 
 	ARPAnomalyDetection ARPAnomalyDetectionConfig `json:"arp_anomaly_detection,omitempty"`
@@ -718,5 +728,49 @@ func ValidateAndNormalizeConfig(cfg Config) (Config, []string, error) {
 		c.DetectDHCPServers = d
 	}
 
+	// REST API validation (dnsplane-aligned keys)
+	c.APIPort = strings.TrimSpace(c.APIPort)
+	c.APIBind = strings.TrimSpace(c.APIBind)
+	c.APIAuthToken = strings.TrimSpace(c.APIAuthToken)
+	c.APITLSCertFile = strings.TrimSpace(c.APITLSCertFile)
+	c.APITLSKeyFile = strings.TrimSpace(c.APITLSKeyFile)
+	if c.API {
+		if c.APIPort == "" {
+			return cfg, warns, fmt.Errorf("api: true requires non-empty apiport")
+		}
+		if c.APIBind != "" {
+			if ip := net.ParseIP(c.APIBind); ip == nil {
+				return cfg, warns, fmt.Errorf("api_bind: invalid IP %q", c.APIBind)
+			}
+		}
+		certSet := c.APITLSCertFile != ""
+		keySet := c.APITLSKeyFile != ""
+		if certSet != keySet {
+			return cfg, warns, fmt.Errorf("api_tls_cert and api_tls_key must both be set or both empty")
+		}
+		if c.APIRateLimitPerIP > 0 && c.APIRateLimitBurst <= 0 {
+			c.APIRateLimitBurst = 20
+		}
+		if clash := apiConsolePortClash(c.ConsoleTCPAddress, c.APIPort); clash != "" {
+			return cfg, warns, fmt.Errorf("api: %s", clash)
+		}
+	}
+
 	return c, warns, nil
+}
+
+// apiConsolePortClash reports an error message if console TCP uses the same port as the REST API.
+func apiConsolePortClash(consoleTCP, apiPort string) string {
+	consoleTCP = strings.TrimSpace(consoleTCP)
+	if consoleTCP == "" {
+		return ""
+	}
+	_, port, err := net.SplitHostPort(consoleTCP)
+	if err != nil {
+		return ""
+	}
+	if port == strings.TrimSpace(apiPort) {
+		return fmt.Sprintf("apiport %s conflicts with console_tcp_address %q (same TCP port)", apiPort, consoleTCP)
+	}
+	return ""
 }

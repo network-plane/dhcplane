@@ -1,6 +1,7 @@
 package main
 
 import (
+	"dhcplane/api"
 	"dhcplane/arp"
 	"dhcplane/config"
 	"dhcplane/dhcpserver"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -31,7 +33,7 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-var appVersion = "0.1.67"
+var appVersion = "0.2.71"
 
 func buildConsoleConfig(maxLines int) planeconsole.Config {
 	if maxLines <= 0 {
@@ -679,6 +681,53 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 	reservationsAtomic.Store(reservations)
 	reservationsGet := func() config.Reservations { return reservationsAtomic.Load().(config.Reservations) }
 
+	var dhcpServing atomic.Bool
+	var lastAPIFingerprint string
+	apiLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	apiDeps := &api.Deps{
+		DB:           db,
+		Cfg:          cfgGet,
+		Reservations: reservationsGet,
+		DHCPServing:  dhcpServing.Load,
+		AppVersion:   appVersion,
+		AuthToken: func() string {
+			c := cfgGet()
+			if c == nil {
+				return ""
+			}
+			return strings.TrimSpace(c.APIAuthToken)
+		},
+	}
+	applyAPI := func() {
+		c := cfgGet()
+		if c == nil {
+			return
+		}
+		fp := apiListenFingerprint(c)
+		want := c.API && strings.TrimSpace(c.APIPort) != ""
+		if !want {
+			api.Stop(apiLogger)
+			lastAPIFingerprint = fp
+			return
+		}
+		if fp == lastAPIFingerprint && api.Running() {
+			return
+		}
+		api.Stop(apiLogger)
+		lastAPIFingerprint = fp
+		opts := &api.ListenOptions{
+			BindIP:         c.APIBind,
+			TLSCertFile:    c.APITLSCertFile,
+			TLSKeyFile:     c.APITLSKeyFile,
+			RateLimitRPS:   c.APIRateLimitPerIP,
+			RateLimitBurst: c.APIRateLimitBurst,
+		}
+		api.Start(strings.TrimSpace(c.APIPort), opts, apiDeps, apiLogger)
+		if api.Running() {
+			logSink("API listening on %s (TLS=%v)", formatAPIListenAddr(c), c.APITLSCertFile != "" && c.APITLSKeyFile != "")
+		}
+	}
+
 	// Authoritative getter from config (default: true when unset)
 	effectiveAuthoritative := func(c *config.Config) bool {
 		if c == nil || c.Authoritative == nil {
@@ -723,11 +772,13 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 		}
 		closerUDP = c
 		currentIface = newIface
+		dhcpServing.Store(true)
 		return nil
 	}
 	if err := bind(currentIface); err != nil {
 		return fmt.Errorf("bind: %w (need root/CAP_NET_BIND_SERVICE)", err)
 	}
+	applyAPI()
 
 	logSink("START iface=%q bind=%s server_ip=%s subnet=%s gateway=%s lease=%s sticky=%s authoritative=%v",
 		currentIface, laddr.String(), cfg.ServerIP, cfg.SubnetCIDR, cfg.Gateway,
@@ -833,6 +884,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 
 			// DETECT announcement after auto-reload apply
 			logDetect(&newCfg, currentIface, logSink)
+			applyAPI()
 		}, logSink)
 		if watcherErr != nil {
 			logSink("AUTO-RELOAD: watcher failed: %v", watcherErr)
@@ -932,9 +984,11 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 
 			// DETECT DHCPSERVERS announcement after manual reload
 			logDetect(&newCfg, currentIface, logSink)
+			applyAPI()
 
 		case syscall.SIGINT, syscall.SIGTERM:
 			logSink("SIGNAL received, shutting down")
+			api.Stop(apiLogger)
 			_ = s.Close()
 			_ = db.Save()
 			if watcher != nil {
@@ -2450,6 +2504,29 @@ WantedBy=multi-user.target
 
 type ioCloser interface {
 	Close() error
+}
+
+func apiListenFingerprint(c *config.Config) string {
+	if c == nil {
+		return ""
+	}
+	return fmt.Sprintf("e=%t|p=%s|b=%s|tc=%s|tk=%s|rps=%.6f|rb=%d",
+		c.API, strings.TrimSpace(c.APIPort), strings.TrimSpace(c.APIBind),
+		strings.TrimSpace(c.APITLSCertFile), strings.TrimSpace(c.APITLSKeyFile),
+		c.APIRateLimitPerIP, c.APIRateLimitBurst,
+	)
+}
+
+func formatAPIListenAddr(c *config.Config) string {
+	if c == nil {
+		return ""
+	}
+	p := strings.TrimSpace(c.APIPort)
+	b := strings.TrimSpace(c.APIBind)
+	if b != "" {
+		return net.JoinHostPort(b, p)
+	}
+	return ":" + p
 }
 
 func ipKey(s string) uint32 {

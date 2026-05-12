@@ -27,21 +27,21 @@ type LeaseLite struct {
 
 // LeaseView is the compact row shape for simple lists (current/expiring/expired).
 type LeaseView struct {
-	IP          string
-	MAC         string
-	Hostname    string
-	AllocatedAt int64 // epoch seconds
-	Expiry      int64 // epoch seconds
+	IP          string `json:"ip"`
+	MAC         string `json:"mac"`
+	Hostname    string `json:"hostname"`
+	AllocatedAt int64  `json:"allocated_at"`
+	Expiry      int64  `json:"expiry"`
 }
 
 // DetailRow is the unified row for the full subnet scan with Type.
 type DetailRow struct {
-	IP          string
-	Type        string // leased | reserved | banned-mac | banned-ip | free | unused
-	MAC         string
-	Hostname    string
-	AllocatedAt int64
-	Expiry      int64
+	IP          string `json:"ip"`
+	Type        string `json:"type"`
+	MAC         string `json:"mac,omitempty"`
+	Hostname    string `json:"hostname,omitempty"`
+	AllocatedAt int64  `json:"allocated_at"`
+	Expiry      int64  `json:"expiry"`
 }
 
 // LeaseIter lets the caller stream live leases without copying maps.
