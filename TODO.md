@@ -1,4 +1,8 @@
 # TODO
+- [ ] [#16 - export console global flag needs to be only for the serve command](https://github.com/network-plane/dhcplane/issues/16)
+- [ ] [#15 - implement a tui for config using the planetui package](https://github.com/network-plane/dhcplane/issues/15)
+- [ ] [#14 - remote console doesnt check where it connects, any tcp service it will attach too](https://github.com/network-plane/dhcplane/issues/14)
+- [ ] [#13 - colour for the console doesnt transfer over the remote console](https://github.com/network-plane/dhcplane/issues/13)
 - [ ] [#10 - OUI Manufacturer Detection](https://github.com/network-plane/dhcplane/issues/10)
 - [ ] [#9 - when the dhcpdoc does a discover we get this error](https://github.com/network-plane/dhcplane/issues/9)
 - [ ] [#7 - create an API in a local socket/ip for management](https://github.com/network-plane/dhcplane/issues/7)
