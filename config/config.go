@@ -170,6 +170,10 @@ type Config struct {
 	APIRateLimitPerIP    float64 `json:"api_rate_limit_rps,omitempty"`
 	APIRateLimitBurst    int     `json:"api_rate_limit_burst,omitempty"`
 
+	// StatsDashboardEnabled serves GET /stats/dashboard, /stats/dashboard/data, and /stats/dashboard/ws.
+	// JSON omitted defaults to enabled (see DashboardHTMLEnabled).
+	StatsDashboardEnabled *bool `json:"stats_dashboard_enabled,omitempty"`
+
 	DetectDHCPServers DHCPServerDetectionConfig `json:"detect_dhcp_servers,omitempty"`
 
 	ARPAnomalyDetection ARPAnomalyDetectionConfig `json:"arp_anomaly_detection,omitempty"`
@@ -203,6 +207,14 @@ type LoggingConfig struct {
 	MaxBackups int    `json:"max_backups,omitempty"`
 	MaxAge     int    `json:"max_age,omitempty"` // days
 	Compress   bool   `json:"compress,omitempty"`
+}
+
+// StatsDashboardHTMLEnabled reports whether HTML/WS dashboard routes are allowed (default true when unset).
+func (c *Config) StatsDashboardHTMLEnabled() bool {
+	if c == nil || c.StatsDashboardEnabled == nil {
+		return true
+	}
+	return *c.StatsDashboardEnabled
 }
 
 /* ----------------- Config parsing & validation ----------------- */

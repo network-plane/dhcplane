@@ -148,4 +148,61 @@ func TestDHCPLeases(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/dhcp/leases", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("leases: %d", rec.Code)
+	}
+}
+
+func TestDashboardData404WhenDisabled(t *testing.T) {
+	disabled := false
+	cfg := &config.Config{
+		StatsDashboardEnabled: &disabled,
+		LeaseSeconds:          3600,
+		SubnetCIDR:            "192.0.2.0/24",
+		Pools:                 []config.Pool{{Start: "192.0.2.10", End: "192.0.2.20"}},
+	}
+	db := dhcpserver.NewLeaseDB(t.TempDir() + "/leases.json")
+	_ = db.Load()
+	h := testRouter(&Deps{
+		Cfg:         func() *config.Config { return cfg },
+		DB:          db,
+		AppVersion:  "test",
+		DHCPServing: func() bool { return true },
+	}, "")
+	req := httptest.NewRequest(http.MethodGet, "/stats/dashboard/data", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("dashboard data: want 404 got %d", rec.Code)
+	}
+}
+
+func TestDashboardData200WhenEnabled(t *testing.T) {
+	cfg := &config.Config{
+		LeaseSeconds: 3600,
+		SubnetCIDR:   "192.0.2.0/24",
+		Pools:        []config.Pool{{Start: "192.0.2.10", End: "192.0.2.20"}},
+	}
+	db := dhcpserver.NewLeaseDB(t.TempDir() + "/leases.json")
+	_ = db.Load()
+	h := testRouter(&Deps{
+		Cfg:          func() *config.Config { return cfg },
+		DB:           db,
+		Reservations: func() config.Reservations { return nil },
+		AppVersion:   "test",
+		DHCPServing:  func() bool { return true },
+	}, "")
+	req := httptest.NewRequest(http.MethodGet, "/stats/dashboard/data", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dashboard data: want 200 got %d", rec.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["build"] == nil {
+		t.Fatal("missing build")
+	}
 }

@@ -2279,35 +2279,36 @@ type fullConfigOrdered struct {
 	Exclusions []string      `json:"exclusions"`
 
 	// Additional options
-	NTP                  []string                         `json:"ntp"`
-	MTU                  int                              `json:"mtu"`
-	TFTPServerName       string                           `json:"tftp_server_name"`
-	BootFileName         string                           `json:"bootfile_name"`
-	WPADURL              string                           `json:"wpad_url"`
-	WINS                 []string                         `json:"wins"`
-	DomainSearch         []string                         `json:"domain_search"`
-	StaticRoutes         []config.StaticRoute             `json:"static_routes"`
-	MirrorRoutesTo249    bool                             `json:"mirror_routes_to_249"`
-	VendorSpecific43Hex  string                           `json:"vendor_specific_43_hex"`
-	DeviceOverrides      map[string]config.DeviceOverride `json:"device_overrides"`
-	VendorClassOverrides map[string]config.DeviceOverride `json:"vendor_class_overrides"`
-	UserClassOverrides77 map[string]config.DeviceOverride `json:"user_class_overrides_77"`
-	Hostname12           string                           `json:"hostname_12"`
-	EnableBroadcast28    bool                             `json:"enable_broadcast_28"`
-	UseClassfulRoutes33  bool                             `json:"use_classful_routes_33"`
-	Routes33             []config.StaticRoute33           `json:"routes_33"`
-	NetBIOSNodeType46    uint8                            `json:"netbios_node_type_46"`
-	NetBIOSScopeID47     string                           `json:"netbios_scope_id_47"`
-	MaxDHCPMessageSize57 uint16                           `json:"max_dhcp_message_size_57"`
-	TFTPServers150       []string                         `json:"tftp_servers_150"`
-	EchoRelayAgentInfo82 bool                             `json:"echo_relay_agent_info_82"`
-	BannedMACs           map[string]config.DeviceMeta     `json:"banned_macs"`
-	EquipmentTypes       []string                         `json:"equipment_types"`
-	ManagementTypes      []string                         `json:"management_types"`
-	ConsoleMaxLines      int                              `json:"console_max_lines"`
-	ConsoleTCPAddress    string                           `json:"console_tcp_address"`
-	DetectDHCPServers    config.DHCPServerDetectionConfig `json:"detect_dhcp_servers"`
-	ARPAnomalyDetection  config.ARPAnomalyDetectionConfig `json:"arp_anomaly_detection"`
+	NTP                   []string                         `json:"ntp"`
+	MTU                   int                              `json:"mtu"`
+	TFTPServerName        string                           `json:"tftp_server_name"`
+	BootFileName          string                           `json:"bootfile_name"`
+	WPADURL               string                           `json:"wpad_url"`
+	WINS                  []string                         `json:"wins"`
+	DomainSearch          []string                         `json:"domain_search"`
+	StaticRoutes          []config.StaticRoute             `json:"static_routes"`
+	MirrorRoutesTo249     bool                             `json:"mirror_routes_to_249"`
+	VendorSpecific43Hex   string                           `json:"vendor_specific_43_hex"`
+	DeviceOverrides       map[string]config.DeviceOverride `json:"device_overrides"`
+	VendorClassOverrides  map[string]config.DeviceOverride `json:"vendor_class_overrides"`
+	UserClassOverrides77  map[string]config.DeviceOverride `json:"user_class_overrides_77"`
+	Hostname12            string                           `json:"hostname_12"`
+	EnableBroadcast28     bool                             `json:"enable_broadcast_28"`
+	UseClassfulRoutes33   bool                             `json:"use_classful_routes_33"`
+	Routes33              []config.StaticRoute33           `json:"routes_33"`
+	NetBIOSNodeType46     uint8                            `json:"netbios_node_type_46"`
+	NetBIOSScopeID47      string                           `json:"netbios_scope_id_47"`
+	MaxDHCPMessageSize57  uint16                           `json:"max_dhcp_message_size_57"`
+	TFTPServers150        []string                         `json:"tftp_servers_150"`
+	EchoRelayAgentInfo82  bool                             `json:"echo_relay_agent_info_82"`
+	BannedMACs            map[string]config.DeviceMeta     `json:"banned_macs"`
+	EquipmentTypes        []string                         `json:"equipment_types"`
+	ManagementTypes       []string                         `json:"management_types"`
+	ConsoleMaxLines       int                              `json:"console_max_lines"`
+	ConsoleTCPAddress     string                           `json:"console_tcp_address"`
+	StatsDashboardEnabled *bool                            `json:"stats_dashboard_enabled,omitempty"`
+	DetectDHCPServers     config.DHCPServerDetectionConfig `json:"detect_dhcp_servers"`
+	ARPAnomalyDetection   config.ARPAnomalyDetectionConfig `json:"arp_anomaly_detection"`
 }
 
 type defaultLoggingOrdered struct {
@@ -2427,21 +2428,22 @@ func writeFullConfig(cfgPath string) error {
 				BootFileName:   "pxelinux.0",
 			},
 		},
-		UserClassOverrides77: map[string]config.DeviceOverride{},
-		Hostname12:           "",
-		EnableBroadcast28:    false,
-		UseClassfulRoutes33:  false,
-		Routes33:             []config.StaticRoute33{},
-		NetBIOSNodeType46:    0,
-		NetBIOSScopeID47:     "",
-		MaxDHCPMessageSize57: 1500,
-		TFTPServers150:       []string{},
-		EchoRelayAgentInfo82: false,
-		BannedMACs:           map[string]config.DeviceMeta{},
-		EquipmentTypes:       []string{"Switch", "Router", "AP", "Modem", "Gateway", "Appliance", "Camera", "Sensor"},
-		ManagementTypes:      []string{"ssh", "web", "telnet", "serial", "console"},
-		ConsoleMaxLines:      10000,
-		ConsoleTCPAddress:    "",
+		UserClassOverrides77:  map[string]config.DeviceOverride{},
+		Hostname12:            "",
+		EnableBroadcast28:     false,
+		UseClassfulRoutes33:   false,
+		Routes33:              []config.StaticRoute33{},
+		NetBIOSNodeType46:     0,
+		NetBIOSScopeID47:      "",
+		MaxDHCPMessageSize57:  1500,
+		TFTPServers150:        []string{},
+		EchoRelayAgentInfo82:  false,
+		BannedMACs:            map[string]config.DeviceMeta{},
+		EquipmentTypes:        []string{"Switch", "Router", "AP", "Modem", "Gateway", "Appliance", "Camera", "Sensor"},
+		ManagementTypes:       []string{"ssh", "web", "telnet", "serial", "console"},
+		ConsoleMaxLines:       10000,
+		ConsoleTCPAddress:     "",
+		StatsDashboardEnabled: boolPtr(true),
 		DetectDHCPServers: config.DHCPServerDetectionConfig{
 			Enabled:          true,
 			ActiveProbe:      "safe",
@@ -2504,6 +2506,10 @@ WantedBy=multi-user.target
 
 type ioCloser interface {
 	Close() error
+}
+
+func boolPtr(b bool) *bool {
+	return &b
 }
 
 func apiListenFingerprint(c *config.Config) string {

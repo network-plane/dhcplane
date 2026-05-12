@@ -44,7 +44,7 @@ func apiAuthExempt(r *http.Request) bool {
 		return false
 	}
 	p := path.Clean("/" + strings.TrimPrefix(r.URL.Path, "/"))
-	return p == "/health" || p == "/ready"
+	return p == "/health" || p == "/ready" || p == "/stats/dashboard/ws"
 }
 
 func apiRequestAuthorized(r *http.Request, want string) bool {

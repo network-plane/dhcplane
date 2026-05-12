@@ -55,6 +55,9 @@ func RegisterDHCPRoutes(router chi.Router, deps *Deps) {
 	router.Get("/dhcp/leases", func(w http.ResponseWriter, r *http.Request) { leasesHandler(w, r, d) })
 	router.Get("/dhcp/reservations", func(w http.ResponseWriter, r *http.Request) { reservationsHandler(w, r, d) })
 	router.Get("/dhcp/stats", func(w http.ResponseWriter, r *http.Request) { statsHandler(w, r, d) })
+	router.Get("/stats/dashboard", func(w http.ResponseWriter, r *http.Request) { dashboardPageHandler(w, r, d) })
+	router.Get("/stats/dashboard/data", func(w http.ResponseWriter, r *http.Request) { dashboardDataHandler(w, r, d) })
+	router.Get("/stats/dashboard/ws", func(w http.ResponseWriter, r *http.Request) { dashboardWebSocketHandler(w, r, d) })
 }
 
 func buildRouter(deps *Deps, opts *ListenOptions) http.Handler {

@@ -144,9 +144,9 @@ func statsHandler(w http.ResponseWriter, r *http.Request, d *Deps) {
 			"lease_ttl": cfg.LeaseSeconds,
 		},
 		"lease_views": map[string][]statistics.LeaseView{
-			"current":   curr,
-			"expiring":  expiring,
-			"expired":   expired,
+			"current":  curr,
+			"expiring": expiring,
+			"expired":  expired,
 		},
 	}
 
