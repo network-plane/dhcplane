@@ -117,6 +117,48 @@ func TestAuthRequired(t *testing.T) {
 	}
 }
 
+func TestDHCPSearchAndSubnet(t *testing.T) {
+	cfg := &config.Config{
+		LeaseSeconds: 3600,
+		SubnetCIDR:   "192.0.2.0/24",
+		ServerIP:     "192.0.2.1",
+		Gateway:      "192.0.2.1",
+		Pools:        []config.Pool{{Start: "192.0.2.10", End: "192.0.2.20"}},
+	}
+	db := dhcpserver.NewLeaseDB(t.TempDir() + "/leases.json")
+	_ = db.Load()
+	db.Set(dhcpserver.Lease{IP: "192.0.2.10", MAC: "aa:bb:cc:dd:ee:ff", Hostname: "h", AllocatedAt: 1, Expiry: 9999999999, FirstSeen: 1})
+	res := config.Reservations{"aa:bb:cc:dd:ee:ff": {IP: "192.0.2.10", Note: "lab"}}
+	h := testRouter(&Deps{
+		Cfg:          func() *config.Config { return cfg },
+		DB:           db,
+		Reservations: func() config.Reservations { return res },
+		AppVersion:   "test",
+		DHCPServing:  func() bool { return true },
+	}, "")
+
+	req := httptest.NewRequest(http.MethodGet, "/dhcp/search/192.0.2.10", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("search: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var search map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &search); err != nil {
+		t.Fatal(err)
+	}
+	if search["found"] != true {
+		t.Fatalf("expected found=true: %#v", search)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/dhcp/subnet", nil)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("subnet: %d body=%s", rec2.Code, rec2.Body.String())
+	}
+}
+
 func TestDHCPReservations(t *testing.T) {
 	res := config.Reservations{
 		"aa:bb:cc:dd:ee:ff": {IP: "192.0.2.10", Note: "x"},

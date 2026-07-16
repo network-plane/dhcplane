@@ -25,7 +25,7 @@ const dhcpDashboardHTMLPart1 = `<!DOCTYPE html>
       --success: #3fb950;
       --warning: #d29922;
       --danger: #f85149;
-      --sidebar-w: 160px;
+      --sidebar-w: 168px;
       --radius: 8px;
     }
     * { box-sizing: border-box; }
@@ -381,6 +381,18 @@ const dhcpDashboardHTMLPart1 = `<!DOCTYPE html>
       text-transform: uppercase;
       letter-spacing: 0.03em;
     }
+    .res-table th.sort-th {
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }
+    .res-table th.sort-th:hover { color: var(--text); }
+    .res-table th.sort-th .sort-ind {
+      display: inline-block;
+      min-width: 1.1em;
+      margin-left: 0.25rem;
+      color: var(--accent);
+    }
     .res-table tbody tr:nth-child(even) { background: rgba(255,255,255,0.02); }
     .res-table tbody tr:hover { background: var(--surface-hover); }
     .res-table td.mono {
@@ -449,6 +461,81 @@ const dhcpDashboardHTMLPart1 = `<!DOCTYPE html>
       text-underline-offset: 0.12em;
     }
     .res-cell-filter:hover { color: var(--accent); }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.2rem 0.5rem;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      background: var(--surface-hover);
+      color: var(--text);
+    }
+    .subnet-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(14px, 1fr));
+      gap: 2px;
+      margin: 0.75rem 0 1rem 0;
+      max-width: 100%;
+    }
+    .subnet-cell {
+      width: 100%;
+      aspect-ratio: 1;
+      border-radius: 2px;
+      border: 1px solid transparent;
+      cursor: default;
+    }
+    .subnet-cell.type-leased { background: #f85149; }
+    .subnet-cell.type-reserved { background: #a371f7; }
+    .subnet-cell.type-free { background: #3fb950; }
+    .subnet-cell.type-unused { background: #30363d; }
+    .subnet-cell.type-banned-mac { background: #d29922; }
+    .subnet-cell.type-banned-ip { background: #6e7681; }
+    .legend-row { display:flex; flex-wrap:wrap; gap:0.75rem 1rem; margin-bottom:0.75rem; font-size:0.78rem; color:var(--muted); }
+    .legend-item { display:inline-flex; align-items:center; gap:0.35rem; }
+    .legend-swatch { width:0.7rem; height:0.7rem; border-radius:2px; display:inline-block; }
+    .admin-actions { display:flex; flex-wrap:wrap; gap:0.65rem; margin-bottom:1rem; }
+    .admin-actions button, .btn {
+      background: var(--accent);
+      color: #0d1117;
+      border: none;
+      border-radius: 6px;
+      padding: 0.45rem 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .admin-actions button.secondary, .btn.secondary {
+      background: var(--surface-hover);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .admin-actions button:disabled, .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .console-box {
+      background: #010409;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.75rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.78rem;
+      max-height: calc(100vh - 10rem);
+      overflow: auto;
+      white-space: pre-wrap;
+      line-height: 1.45;
+    }
+    .search-result {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.15rem;
+      margin-top: 0.75rem;
+    }
+    .search-result h3 { margin: 0 0 0.5rem 0; font-size: 0.95rem; }
+    .kv { display:grid; grid-template-columns: 10rem 1fr; gap:0.35rem 0.75rem; font-size:0.85rem; }
+    .kv .k { color: var(--muted); }
+    .kv .v { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
   </style>
 </head>
 <body>
@@ -458,7 +545,15 @@ const dhcpDashboardHTMLPart1 = `<!DOCTYPE html>
     <nav>
       <button type="button" class="nav-item active" data-view="status">Status</button>
       <button type="button" class="nav-item" data-view="stats">Statistics</button>
+      <button type="button" class="nav-item" data-view="subnet">Address Space</button>
+      <button type="button" class="nav-item" data-view="search">Search</button>
+      <button type="button" class="nav-item" data-view="network">Network</button>
+      <button type="button" class="nav-item" data-view="alerts">Alerts</button>
       <button type="button" class="nav-item" data-view="log">Log</button>
+      <button type="button" class="nav-item" data-view="devices">Devices</button>
+      <button type="button" class="nav-item" data-view="leases">Leases</button>
+      <button type="button" class="nav-item" data-view="console">Console</button>
+      <button type="button" class="nav-item" data-view="admin">Admin</button>
     </nav>
     <div class="nav-external" aria-label="Project links">
       <a href="https://github.com/network-plane/dhcplane" target="_blank" rel="noopener noreferrer" title="GitHub" aria-label="dhcplane on GitHub">
@@ -468,15 +563,18 @@ const dhcpDashboardHTMLPart1 = `<!DOCTYPE html>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
       </a>
     </div>
+  </aside>
+  <main class="main-shell">
+    <div id="err" class="err"></div>
+    <div id="ws-status" class="ws-status" aria-live="polite">Updates: —</div>
+`
+
+const dhcpDashboardTokenPanel = `
     <div class="token-panel">
       API token
       <input type="password" id="apiTok" placeholder="Bearer token" autocomplete="off">
       <button type="button" id="saveTok">Save to session</button>
     </div>
-  </aside>
-  <main class="main-shell">
-    <div id="err" class="err"></div>
-    <div id="ws-status" class="ws-status" aria-live="polite">Updates: —</div>
 `
 
 const dhcpDashboardHTMLPart2 = `
@@ -617,9 +715,137 @@ const dhcpDashboardHTMLPart2 = `
       <div class="res-count" id="log-count">—</div>
       <div class="res-table-wrap">
         <table class="res-table">
-          <thead><tr><th>IP</th><th>MAC</th><th>Hostname</th><th>Allocated</th><th>Expiry</th></tr></thead>
+          <thead><tr><th class="sort-th" data-table-sort="log" data-sort-key="ip">IP <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="log" data-sort-key="mac">MAC <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="log" data-sort-key="hostname">Hostname <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="log" data-sort-key="allocated_ts">Allocated <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="log" data-sort-key="expiry_ts">Expiry <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="log" data-sort-key="first_seen_ts">First seen <span class="sort-ind"></span></th></tr></thead>
           <tbody id="lease-log-body"></tbody>
         </table>
+      </div>
+    </div>
+
+    <div id="view-devices" class="view hidden">
+      <h1>Devices</h1>
+      <p class="muted" style="margin-top:-0.5rem">Configured MAC-based entries from reservations and banned MACs. Search and sort locally from the dashboard payload.</p>
+      <div class="res-toolbar">
+        <label>Kind <input type="search" id="devices-in-kind" placeholder="reservation / banned" autocomplete="off" spellcheck="false" aria-label="Filter by kind"></label>
+        <label>MAC <input type="search" id="devices-in-mac" placeholder="aa:bb:cc..." autocomplete="off" spellcheck="false" aria-label="Filter by MAC"></label>
+        <label>IP / Host note <input type="search" id="devices-in-ip" placeholder="Reserved IP" autocomplete="off" spellcheck="false" aria-label="Filter by IP"></label>
+        <label>Any text <input type="search" id="devices-in-any" placeholder="Note / vendor / management" autocomplete="off" spellcheck="false" aria-label="Filter any device field"></label>
+      </div>
+      <div class="res-count" id="devices-count">—</div>
+      <div class="res-table-wrap">
+        <table class="res-table">
+          <thead><tr><th class="sort-th" data-table-sort="devices" data-sort-key="kind">Kind <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="devices" data-sort-key="mac">MAC <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="devices" data-sort-key="ip">IP <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="devices" data-sort-key="note">Note <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="devices" data-sort-key="equipment_type">Equipment <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="devices" data-sort-key="manufacturer">Manufacturer <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="devices" data-sort-key="management_type">Management <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="devices" data-sort-key="first_seen_ts">First seen <span class="sort-ind"></span></th></tr></thead>
+          <tbody id="devices-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="view-leases" class="view hidden">
+      <h1>Leases</h1>
+      <p class="muted" style="margin-top:-0.5rem">Full dynamic lease database with allocation and first-seen metadata. Search and sort locally; updated with the dashboard feed.</p>
+      <div class="res-toolbar">
+        <label>IP <input type="search" id="leases-in-ip" placeholder="Partial match" autocomplete="off" spellcheck="false" aria-label="Filter leases by IP"></label>
+        <label>MAC <input type="search" id="leases-in-mac" placeholder="Partial match" autocomplete="off" spellcheck="false" aria-label="Filter leases by MAC"></label>
+        <label>Hostname <input type="search" id="leases-in-host" placeholder="Partial match" autocomplete="off" spellcheck="false" aria-label="Filter leases by hostname"></label>
+        <label>Any text <input type="search" id="leases-in-any" placeholder="Allocated / expiry / first seen" autocomplete="off" spellcheck="false" aria-label="Filter any lease field"></label>
+      </div>
+      <div class="res-count" id="leases-count">—</div>
+      <div class="res-table-wrap">
+        <table class="res-table">
+          <thead><tr><th class="sort-th" data-table-sort="leases" data-sort-key="ip">IP <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="leases" data-sort-key="mac">MAC <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="leases" data-sort-key="hostname">Hostname <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="leases" data-sort-key="allocated_ts">Allocated <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="leases" data-sort-key="expiry_ts">Expiry <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="leases" data-sort-key="first_seen_ts">First seen <span class="sort-ind"></span></th></tr></thead>
+          <tbody id="leases-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="view-subnet" class="view hidden">
+      <h1>Address Space</h1>
+      <p class="muted" style="margin-top:-0.5rem">Full subnet classification (same as <code>stats --details</code> / <code>--grid</code>). Click headers to sort; filter with the search boxes.</p>
+      <div class="legend-row" id="subnet-legend"></div>
+      <div class="subnet-grid" id="subnet-grid" title="Subnet occupancy grid"></div>
+      <div class="res-toolbar">
+        <label>Type <input type="search" id="subnet-in-type" placeholder="leased / free / …" autocomplete="off" spellcheck="false"></label>
+        <label>IP <input type="search" id="subnet-in-ip" placeholder="Partial match" autocomplete="off" spellcheck="false"></label>
+        <label>MAC / Host <input type="search" id="subnet-in-mac" placeholder="MAC or hostname" autocomplete="off" spellcheck="false"></label>
+        <label>Any text <input type="search" id="subnet-in-any" placeholder="Any column" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <div class="res-count" id="subnet-count">—</div>
+      <div class="res-table-wrap">
+        <table class="res-table">
+          <thead><tr><th class="sort-th" data-table-sort="subnet" data-sort-key="ip">IP <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="subnet" data-sort-key="type">Type <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="subnet" data-sort-key="mac">MAC <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="subnet" data-sort-key="hostname">Hostname <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="subnet" data-sort-key="allocated_ts">Allocated <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="subnet" data-sort-key="expiry_ts">Expiry <span class="sort-ind"></span></th></tr></thead>
+          <tbody id="subnet-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="view-search" class="view hidden">
+      <h1>Search</h1>
+      <p class="muted" style="margin-top:-0.5rem">Look up an IP in reservations and leases (same as <code>dhcplane search</code>).</p>
+      <div class="res-toolbar">
+        <label>IP address <input type="search" id="search-ip" placeholder="192.168.178.100" autocomplete="off" spellcheck="false"></label>
+        <button type="button" class="btn" id="search-run">Search</button>
+      </div>
+      <div id="search-out"></div>
+    </div>
+
+    <div id="view-network" class="view hidden">
+      <h1>Network</h1>
+      <p class="muted" style="margin-top:-0.5rem">ARP table from a live scan (same as <code>dhcplane arp</code>). Rate-limited; may require privileges on the host.</p>
+      <div class="admin-actions">
+        <button type="button" id="arp-scan-btn">Run ARP scan</button>
+        <button type="button" class="secondary" id="arp-scan-all-btn">Scan all interfaces</button>
+      </div>
+      <div class="res-count" id="arp-count">—</div>
+      <div class="res-toolbar">
+        <label>Any text <input type="search" id="arp-in-any" placeholder="IP / MAC / state / note" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <div class="res-table-wrap">
+        <table class="res-table">
+          <thead><tr><th class="sort-th" data-table-sort="arp" data-sort-key="ip">IP <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="arp" data-sort-key="mac">MAC <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="arp" data-sort-key="iface">Iface <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="arp" data-sort-key="state">State <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="arp" data-sort-key="note">Note <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="arp" data-sort-key="source">Source <span class="sort-ind"></span></th></tr></thead>
+          <tbody id="arp-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="view-alerts" class="view hidden">
+      <h1>Alerts</h1>
+      <p class="muted" style="margin-top:-0.5rem">Recent ARP anomalies and foreign DHCP server detections from background monitoring.</p>
+      <div class="res-toolbar">
+        <label>Any text <input type="search" id="alerts-in-any" placeholder="kind / IP / reason" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <div class="res-count" id="alerts-count">—</div>
+      <div class="res-table-wrap">
+        <table class="res-table">
+          <thead><tr><th class="sort-th" data-table-sort="alerts" data-sort-key="at_unix">When <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="alerts" data-sort-key="kind">Kind <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="alerts" data-sort-key="ip">IP <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="alerts" data-sort-key="mac">MAC <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="alerts" data-sort-key="reason">Reason <span class="sort-ind"></span></th><th class="sort-th" data-table-sort="alerts" data-sort-key="message">Details <span class="sort-ind"></span></th></tr></thead>
+          <tbody id="alerts-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="view-console" class="view hidden">
+      <h1>Console</h1>
+      <p class="muted" style="margin-top:-0.5rem">Recent server log lines captured while the API is running (subset of console/file logging).</p>
+      <div class="console-box" id="console-box">—</div>
+    </div>
+
+    <div id="view-admin" class="view hidden">
+      <h1>Admin</h1>
+      <p class="muted" style="margin-top:-0.5rem">Operational actions: validate config, reload, and manage reservations. Mutating actions require API auth when configured.</p>
+      <div class="admin-actions">
+        <button type="button" id="admin-check-btn">Validate config</button>
+        <button type="button" id="admin-reload-btn">Reload config</button>
+      </div>
+      <div id="admin-status" class="muted" style="margin-bottom:1rem">—</div>
+      <h2 class="section-kicker">Add / update reservation</h2>
+      <div class="res-toolbar">
+        <label>MAC <input id="admin-res-mac" placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" spellcheck="false"></label>
+        <label>IP <input id="admin-res-ip" placeholder="192.168.178.55" autocomplete="off" spellcheck="false"></label>
+        <label>Note <input id="admin-res-note" placeholder="optional" autocomplete="off" spellcheck="false"></label>
+        <button type="button" class="btn" id="admin-res-add">Save reservation</button>
+      </div>
+      <h2 class="section-kicker">Remove reservation</h2>
+      <div class="res-toolbar">
+        <label>MAC <input id="admin-res-del-mac" placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" spellcheck="false"></label>
+        <button type="button" class="btn secondary" id="admin-res-del">Remove</button>
       </div>
     </div>
   </main>
@@ -633,7 +859,13 @@ const dhcpDashboardHTMLPart3 = `
   var lastStatusKey='', lastBuildKey='', lastMetricsKey='';
   var lastPreviewJSON='', lastFeaturesJSON='', ws=null;
   var leasePreviewData=[];
-  var logState={chips:[]};
+  var configMACData=[], leasesAllData=[], subnetData=[], subnetGrid=[], findingsData=[], consoleLines=[], arpData=[];
+  var logState={chips:[],sortKey:'ip',sortDir:1};
+  var devicesState={sortKey:'kind',sortDir:1};
+  var leasesState={sortKey:'ip',sortDir:1};
+  var subnetState={sortKey:'ip',sortDir:1};
+  var arpState={sortKey:'ip',sortDir:1};
+  var alertsState={sortKey:'at_unix',sortDir:-1};
   var chartLeaseClass=null, chartAllocHour=null;
   var trendLabels=[], trendCur=[], trendExp=[], trendExd=[];
   var lastTrendPush=0, lastTrendKey='';
@@ -660,11 +892,53 @@ const dhcpDashboardHTMLPart3 = `
     if(s==null) return '';
     return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
   }
+  function lower(s){ return String(s==null?'':s).toLowerCase(); }
+  function ipNum(s){
+    var m=String(s||'').trim().match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if(!m) return Number.MAX_SAFE_INTEGER;
+    return (((+m[1])*256+(+m[2]))*256+(+m[3]))*256+(+m[4]);
+  }
+  function cmpText(a,b){
+    a=lower(a); b=lower(b);
+    if(a<b) return -1;
+    if(a>b) return 1;
+    return 0;
+  }
+  function cmpNum(a,b){
+    a=Number(a)||0; b=Number(b)||0;
+    if(a<b) return -1;
+    if(a>b) return 1;
+    return 0;
+  }
+  function sortRows(rows, state, spec){
+    rows.sort(function(a,b){
+      var mode=spec[state.sortKey]||'text';
+      var av=a[state.sortKey], bv=b[state.sortKey], c=0;
+      if(mode==='ip') c=cmpNum(ipNum(av), ipNum(bv));
+      else if(mode==='num') c=cmpNum(av, bv);
+      else c=cmpText(av, bv);
+      if(c===0) c=cmpText(a.ip||a.mac||'', b.ip||b.mac||'');
+      return c*state.sortDir;
+    });
+    return rows;
+  }
+  function toggleSort(state, key){
+    if(state.sortKey===key) state.sortDir=state.sortDir*-1;
+    else { state.sortKey=key; state.sortDir=1; }
+  }
+  function syncSortIndicators(tableName, state){
+    document.querySelectorAll('[data-table-sort="'+tableName+'"]').forEach(function(th){
+      var ind=th.querySelector('.sort-ind');
+      if(!ind) return;
+      ind.textContent=th.getAttribute('data-sort-key')===state.sortKey?(state.sortDir>0?'▲':'▼'):'';
+    });
+  }
   function gid(id){ var el=document.getElementById(id); return el?el.value:''; }
   function showView(name){
-    document.getElementById('view-status').classList.toggle('hidden', name!=='status');
-    document.getElementById('view-stats').classList.toggle('hidden', name!=='stats');
-    document.getElementById('view-log').classList.toggle('hidden', name!=='log');
+    ['status','stats','log','devices','leases','subnet','search','network','alerts','console','admin'].forEach(function(v){
+      var el=document.getElementById('view-'+v);
+      if(el) el.classList.toggle('hidden', name!==v);
+    });
     document.querySelectorAll('nav button.nav-item').forEach(function(b){
       b.classList.toggle('active', b.getAttribute('data-view')===name);
     });
@@ -672,11 +946,15 @@ const dhcpDashboardHTMLPart3 = `
   document.querySelectorAll('nav button.nav-item').forEach(function(b){
     b.onclick=function(){ showView(b.getAttribute('data-view')); };
   });
-  document.getElementById('apiTok').value=tok();
-  document.getElementById('saveTok').onclick=function(){
-    sessionStorage.setItem(LS, document.getElementById('apiTok').value.trim());
-    location.reload();
-  };
+  var apiTokEl=document.getElementById('apiTok');
+  var saveTokEl=document.getElementById('saveTok');
+  if(apiTokEl && saveTokEl){
+    apiTokEl.value=tok();
+    saveTokEl.onclick=function(){
+      sessionStorage.setItem(LS, apiTokEl.value.trim());
+      location.reload();
+    };
+  }
   function chartCommon(){
     var grid='#30363d', tick='#8b949e';
     return {
@@ -867,6 +1145,7 @@ const dhcpDashboardHTMLPart3 = `
     for(var i=0;i<rows.length;i++){
       if(logRowMatches(rows[i])) out.push(rows[i]);
     }
+    sortRows(out, logState, {ip:'ip', mac:'text', hostname:'text', allocated_ts:'num', expiry_ts:'num', first_seen_ts:'num'});
     if(cnt) cnt.textContent='Showing '+out.length+' of '+rows.length+' loaded';
     logb.innerHTML='';
     for(var j=0;j<out.length;j++){
@@ -877,19 +1156,345 @@ const dhcpDashboardHTMLPart3 = `
         '<td class="mono res-cell-filter" data-log-kind="mac" data-log-val="'+escAttr(r.mac)+'">'+esc(r.mac)+'</td>'+
         '<td class="res-cell-filter" data-log-kind="host" data-log-val="'+escAttr(r.hostname)+'">'+esc(r.hostname)+'</td>'+
         '<td class="mono res-cell-filter" data-log-kind="any" data-log-val="'+escAttr(r.allocated_at)+'">'+esc(r.allocated_at)+'</td>'+
-        '<td class="mono res-cell-filter" data-log-kind="any" data-log-val="'+escAttr(r.expiry)+'">'+esc(r.expiry)+'</td>';
+        '<td class="mono res-cell-filter" data-log-kind="any" data-log-val="'+escAttr(r.expiry)+'">'+esc(r.expiry)+'</td>'+
+        '<td class="mono res-cell-filter" data-log-kind="any" data-log-val="'+escAttr(r.first_seen)+'">'+esc(r.first_seen)+'</td>';
       logb.appendChild(tr);
     }
     if(!out.length){
       var empty=document.createElement('tr');
-      empty.innerHTML='<td colspan="5" style="color:var(--muted)">No rows match filters.</td>';
+      empty.innerHTML='<td colspan="6" style="color:var(--muted)">No rows match filters.</td>';
       logb.appendChild(empty);
     }
+    syncSortIndicators('log', logState);
+  }
+  function devicesRowMatches(r){
+    if(!logSubMatch(r.kind, gid('devices-in-kind'))) return false;
+    if(!logSubMatch(r.mac, gid('devices-in-mac'))) return false;
+    if(!logSubMatch(r.ip, gid('devices-in-ip')) && !logSubMatch(r.note, gid('devices-in-ip'))) return false;
+    var blob=(r.kind||'')+' '+(r.mac||'')+' '+(r.ip||'')+' '+(r.note||'')+' '+(r.equipment_type||'')+' '+(r.manufacturer||'')+' '+(r.management_type||'')+' '+(r.management_interface||'')+' '+(r.first_seen||'');
+    if(!logSubMatch(blob, gid('devices-in-any'))) return false;
+    return true;
+  }
+  function renderDevicesTable(){
+    var body=document.getElementById('devices-body');
+    var cnt=document.getElementById('devices-count');
+    if(!body) return;
+    var rows=configMACData||[];
+    var out=[];
+    for(var i=0;i<rows.length;i++){
+      if(devicesRowMatches(rows[i])) out.push(rows[i]);
+    }
+    sortRows(out, devicesState, {kind:'text', mac:'text', ip:'ip', note:'text', equipment_type:'text', manufacturer:'text', management_type:'text', first_seen_ts:'num'});
+    if(cnt) cnt.textContent='Showing '+out.length+' of '+rows.length+' configured MAC entries';
+    var h='';
+    for(var j=0;j<out.length;j++){
+      var r=out[j];
+      h+='<tr>'+
+        '<td><span class="badge">'+esc(r.kind||'—')+'</span></td>'+
+        '<td class="mono">'+esc(r.mac||'')+'</td>'+
+        '<td class="mono">'+esc(r.ip||'—')+'</td>'+
+        '<td>'+esc(r.note||'')+'</td>'+
+        '<td>'+esc(r.equipment_type||'')+'</td>'+
+        '<td>'+esc(r.manufacturer||'')+'</td>'+
+        '<td>'+esc(r.management_type||'')+(r.management_interface?'<div class="muted mono">'+esc(r.management_interface)+'</div>':'')+'</td>'+
+        '<td class="mono">'+esc(r.first_seen||'')+'</td>'+
+        '</tr>';
+    }
+    if(!h) h='<tr><td colspan="8" style="color:var(--muted)">No configured MAC entries match the filters.</td></tr>';
+    body.innerHTML=h;
+    syncSortIndicators('devices', devicesState);
+  }
+  function leasesRowMatches(r){
+    if(!logSubMatch(r.ip, gid('leases-in-ip'))) return false;
+    if(!logSubMatch(r.mac, gid('leases-in-mac'))) return false;
+    if(!logSubMatch(r.hostname, gid('leases-in-host'))) return false;
+    var blob=(r.ip||'')+' '+(r.mac||'')+' '+(r.hostname||'')+' '+(r.allocated_at||'')+' '+(r.expiry||'')+' '+(r.first_seen||'');
+    if(!logSubMatch(blob, gid('leases-in-any'))) return false;
+    return true;
+  }
+  function renderAllLeasesTable(){
+    var body=document.getElementById('leases-body');
+    var cnt=document.getElementById('leases-count');
+    if(!body) return;
+    var rows=leasesAllData||[];
+    var out=[];
+    for(var i=0;i<rows.length;i++){
+      if(leasesRowMatches(rows[i])) out.push(rows[i]);
+    }
+    sortRows(out, leasesState, {ip:'ip', mac:'text', hostname:'text', allocated_ts:'num', expiry_ts:'num', first_seen_ts:'num'});
+    if(cnt) cnt.textContent='Showing '+out.length+' of '+rows.length+' active lease records';
+    var h='';
+    for(var j=0;j<out.length;j++){
+      var r=out[j];
+      h+='<tr>'+
+        '<td class="mono">'+esc(r.ip||'')+'</td>'+
+        '<td class="mono">'+esc(r.mac||'')+'</td>'+
+        '<td>'+esc(r.hostname||'')+'</td>'+
+        '<td class="mono">'+esc(r.allocated_at||'')+'</td>'+
+        '<td class="mono">'+esc(r.expiry||'')+'</td>'+
+        '<td class="mono">'+esc(r.first_seen||'')+'</td>'+
+        '</tr>';
+    }
+    if(!h) h='<tr><td colspan="6" style="color:var(--muted)">No leases match the filters.</td></tr>';
+    body.innerHTML=h;
+    syncSortIndicators('leases', leasesState);
   }
   ['log-in-ip','log-in-mac','log-in-host','log-in-any'].forEach(function(id){
     var el=document.getElementById(id);
     if(el) el.addEventListener('input', function(){ renderLeaseLogFiltered(); });
   });
+  ['devices-in-kind','devices-in-mac','devices-in-ip','devices-in-any'].forEach(function(id){
+    var el=document.getElementById(id);
+    if(el) el.addEventListener('input', function(){ renderDevicesTable(); });
+  });
+  ['leases-in-ip','leases-in-mac','leases-in-host','leases-in-any'].forEach(function(id){
+    var el=document.getElementById(id);
+    if(el) el.addEventListener('input', function(){ renderAllLeasesTable(); });
+  });
+  document.querySelectorAll('th[data-table-sort]').forEach(function(th){
+    th.addEventListener('click', function(){
+      var tableName=th.getAttribute('data-table-sort');
+      var key=th.getAttribute('data-sort-key');
+      if(!tableName||!key) return;
+      if(tableName==='log'){ toggleSort(logState, key); renderLeaseLogFiltered(); return; }
+      if(tableName==='devices'){ toggleSort(devicesState, key); renderDevicesTable(); return; }
+      if(tableName==='leases'){ toggleSort(leasesState, key); renderAllLeasesTable(); return; }
+      if(tableName==='subnet'){ toggleSort(subnetState, key); renderSubnetTable(); return; }
+      if(tableName==='arp'){ toggleSort(arpState, key); renderArpTable(); return; }
+      if(tableName==='alerts'){ toggleSort(alertsState, key); renderAlertsTable(); return; }
+    });
+  });
+  function renderSubnetGrid(counts){
+    var legend=document.getElementById('subnet-legend');
+    var grid=document.getElementById('subnet-grid');
+    if(legend){
+      var order=['leased','reserved','free','unused','banned-mac','banned-ip'];
+      var h='';
+      for(var i=0;i<order.length;i++){
+        var t=order[i];
+        var n=(counts&&counts[t])||0;
+        h+='<span class="legend-item"><span class="legend-swatch subnet-cell type-'+escAttr(t)+'"></span>'+esc(t)+' ('+n+')</span>';
+      }
+      legend.innerHTML=h;
+    }
+    if(!grid) return;
+    var cells=subnetGrid||[];
+    var gh='';
+    for(var j=0;j<cells.length;j++){
+      var c=cells[j];
+      gh+='<div class="subnet-cell type-'+escAttr(c.type||'unused')+'" title="'+escAttr((c.ip||'')+' · '+(c.type||''))+'"></div>';
+    }
+    grid.innerHTML=gh||'<div class="muted">No subnet grid data.</div>';
+  }
+  function subnetRowMatches(r){
+    if(!logSubMatch(r.type, gid('subnet-in-type'))) return false;
+    if(!logSubMatch(r.ip, gid('subnet-in-ip'))) return false;
+    if(!logSubMatch(r.mac, gid('subnet-in-mac')) && !logSubMatch(r.hostname, gid('subnet-in-mac'))) return false;
+    var blob=(r.ip||'')+' '+(r.type||'')+' '+(r.mac||'')+' '+(r.hostname||'')+' '+(r.allocated_at||'')+' '+(r.expiry||'');
+    if(!logSubMatch(blob, gid('subnet-in-any'))) return false;
+    return true;
+  }
+  function renderSubnetTable(){
+    var body=document.getElementById('subnet-body');
+    var cnt=document.getElementById('subnet-count');
+    if(!body) return;
+    var rows=subnetData||[];
+    var out=[];
+    for(var i=0;i<rows.length;i++){ if(subnetRowMatches(rows[i])) out.push(rows[i]); }
+    sortRows(out, subnetState, {ip:'ip', type:'text', mac:'text', hostname:'text', allocated_ts:'num', expiry_ts:'num'});
+    if(cnt) cnt.textContent='Showing '+out.length+' of '+rows.length+' addresses';
+    var h='';
+    for(var j=0;j<out.length;j++){
+      var r=out[j];
+      h+='<tr><td class="mono">'+esc(r.ip)+'</td><td><span class="badge">'+esc(r.type)+'</span></td><td class="mono">'+esc(r.mac||'')+'</td><td>'+esc(r.hostname||'')+'</td><td class="mono">'+esc(r.allocated_at||'')+'</td><td class="mono">'+esc(r.expiry||'')+'</td></tr>';
+    }
+    if(!h) h='<tr><td colspan="6" style="color:var(--muted)">No addresses match filters.</td></tr>';
+    body.innerHTML=h;
+    syncSortIndicators('subnet', subnetState);
+  }
+  function renderAlertsTable(){
+    var body=document.getElementById('alerts-body');
+    var cnt=document.getElementById('alerts-count');
+    if(!body) return;
+    var rows=findingsData||[];
+    var q=gid('alerts-in-any');
+    var out=[];
+    for(var i=0;i<rows.length;i++){
+      var r=rows[i];
+      var blob=(r.at||'')+' '+(r.kind||'')+' '+(r.ip||'')+' '+(r.mac||'')+' '+(r.reason||'')+' '+(r.server_ip||'')+' '+(r.message||'');
+      if(logSubMatch(blob, q)) out.push(r);
+    }
+    sortRows(out, alertsState, {at_unix:'num', kind:'text', ip:'ip', mac:'text', reason:'text', message:'text'});
+    if(cnt) cnt.textContent='Showing '+out.length+' of '+rows.length+' alerts';
+    var h='';
+    for(var j=0;j<out.length;j++){
+      var a=out[j];
+      h+='<tr><td class="mono">'+esc(a.at||'')+'</td><td><span class="badge">'+esc(a.kind||'')+'</span></td><td class="mono">'+esc(a.ip||a.server_ip||'')+'</td><td class="mono">'+esc(a.mac||'')+'</td><td>'+esc(a.reason||'')+'</td><td class="mono">'+esc(a.message||'')+'</td></tr>';
+    }
+    if(!h) h='<tr><td colspan="6" style="color:var(--muted)">No alerts yet. Background ARP/DHCP detection will populate this list.</td></tr>';
+    body.innerHTML=h;
+    syncSortIndicators('alerts', alertsState);
+  }
+  function renderConsole(){
+    var box=document.getElementById('console-box');
+    if(!box) return;
+    var lines=consoleLines||[];
+    if(!lines.length){ box.textContent='No console lines captured yet.'; return; }
+    var t='';
+    for(var i=0;i<lines.length;i++){
+      t+=(lines[i].at||'')+' '+(lines[i].text||'')+'\n';
+    }
+    box.textContent=t;
+    box.scrollTop=box.scrollHeight;
+  }
+  function renderArpTable(){
+    var body=document.getElementById('arp-body');
+    var cnt=document.getElementById('arp-count');
+    if(!body) return;
+    var rows=arpData||[];
+    var q=gid('arp-in-any');
+    var out=[];
+    for(var i=0;i<rows.length;i++){
+      var r=rows[i];
+      var blob=(r.ip||'')+' '+(r.mac||'')+' '+(r.iface||'')+' '+(r.state||'')+' '+(r.note||'')+' '+(r.source||'');
+      if(logSubMatch(blob, q)) out.push(r);
+    }
+    sortRows(out, arpState, {ip:'ip', mac:'text', iface:'text', state:'text', note:'text', source:'text'});
+    if(cnt) cnt.textContent='Showing '+out.length+' of '+rows.length+' ARP entries';
+    var h='';
+    for(var j=0;j<out.length;j++){
+      var e=out[j];
+      h+='<tr><td class="mono">'+esc(e.ip)+'</td><td class="mono">'+esc(e.mac)+'</td><td class="mono">'+esc(e.iface||'')+'</td><td>'+esc(e.state||'')+'</td><td>'+esc(e.note||'')+'</td><td>'+esc(e.source||'')+'</td></tr>';
+    }
+    if(!h) h='<tr><td colspan="6" style="color:var(--muted)">No ARP data yet. Run a scan.</td></tr>';
+    body.innerHTML=h;
+    syncSortIndicators('arp', arpState);
+  }
+  function runSearch(){
+    var ip=(document.getElementById('search-ip')||{}).value||'';
+    ip=String(ip).trim();
+    var out=document.getElementById('search-out');
+    if(!out) return;
+    if(!ip){ out.innerHTML='<div class="muted">Enter an IPv4 address.</div>'; return; }
+    out.innerHTML='<div class="muted">Searching…</div>';
+    fetch('/dhcp/search/'+encodeURIComponent(ip),{headers:authHeaders()}).then(function(r){
+      if(r.status===401){ setErr('Unauthorized — set API token in the sidebar.'); return null; }
+      if(!r.ok) return r.json().then(function(j){ throw new Error((j&&j.error)||('HTTP '+r.status)); });
+      return r.json();
+    }).then(function(d){
+      if(!d) return;
+      if(!d.found){ out.innerHTML='<div class="search-result"><h3>Not found</h3><p class="muted">No reservation or lease for '+esc(d.ip)+'.</p></div>'; return; }
+      var h='<div class="search-result"><h3>Results for '+esc(d.ip)+'</h3>';
+      if(d.mac_mismatch) h+='<p style="color:var(--warning)">MAC mismatch between reservation and lease.</p>';
+      if(d.reservation){
+        var rv=d.reservation;
+        h+='<h3>Reservation</h3><div class="kv">'+
+          '<div class="k">MAC</div><div class="v">'+esc(rv.mac)+'</div>'+
+          '<div class="k">Note</div><div class="v">'+esc(rv.note||'')+'</div>'+
+          '<div class="k">Equipment</div><div class="v">'+esc(rv.equipment_type||'')+'</div>'+
+          '<div class="k">Manufacturer</div><div class="v">'+esc(rv.manufacturer||'')+'</div>'+
+          '<div class="k">First seen</div><div class="v">'+esc(rv.first_seen||'')+'</div></div>';
+      }
+      if(d.lease){
+        var lv=d.lease;
+        h+='<h3 style="margin-top:1rem">Lease</h3><div class="kv">'+
+          '<div class="k">MAC</div><div class="v">'+esc(lv.mac)+'</div>'+
+          '<div class="k">Hostname</div><div class="v">'+esc(lv.hostname||'')+'</div>'+
+          '<div class="k">Allocated</div><div class="v">'+esc(lv.allocated_at||'')+'</div>'+
+          '<div class="k">Expiry</div><div class="v">'+esc(lv.expiry||'')+(lv.expired?' (expired)':'')+'</div>'+
+          '<div class="k">First seen</div><div class="v">'+esc(lv.first_seen||'')+'</div></div>';
+      }
+      h+='</div>';
+      out.innerHTML=h;
+    }).catch(function(e){ out.innerHTML='<div class="err">'+esc(String(e))+'</div>'; });
+  }
+  function runArpScan(allIfaces){
+    var btn=document.getElementById('arp-scan-btn');
+    var btn2=document.getElementById('arp-scan-all-btn');
+    if(btn) btn.disabled=true;
+    if(btn2) btn2.disabled=true;
+    var u='/dhcp/arp/scan'+(allIfaces?'?all_ifaces=1':'');
+    fetch(u,{method:'POST',headers:authHeaders()}).then(function(r){
+      if(r.status===401){ setErr('Unauthorized — set API token in the sidebar.'); return null; }
+      return r.json().then(function(j){ if(!r.ok) throw new Error((j&&j.error)||('HTTP '+r.status)); return j; });
+    }).then(function(d){
+      if(!d) return;
+      arpData=Array.isArray(d.entries)?d.entries.slice():[];
+      renderArpTable();
+      setErr('');
+    }).catch(function(e){ setErr(String(e)); }).finally(function(){
+      if(btn) btn.disabled=false;
+      if(btn2) btn2.disabled=false;
+    });
+  }
+  function adminSetStatus(msg){
+    var el=document.getElementById('admin-status');
+    if(el) el.textContent=msg||'—';
+  }
+  function runCheck(){
+    adminSetStatus('Validating…');
+    fetch('/admin/check',{headers:authHeaders()}).then(function(r){
+      return r.json().then(function(j){ return {ok:r.ok, j:j, status:r.status}; });
+    }).then(function(x){
+      if(x.status===401){ setErr('Unauthorized — set API token in the sidebar.'); adminSetStatus('Unauthorized'); return; }
+      var j=x.j||{};
+      if(j.ok) adminSetStatus('OK: config valid · subnet '+ (j.subnet_cidr||'')+' · reservations '+ (j.reservations_n|0));
+      else adminSetStatus('INVALID ('+(j.stage||'?')+'): '+(j.error||'unknown error'));
+    }).catch(function(e){ adminSetStatus(String(e)); });
+  }
+  function runReload(){
+    if(!confirm('Reload dhcplane config now?')) return;
+    adminSetStatus('Signaling reload…');
+    fetch('/admin/reload',{method:'POST',headers:authHeaders()}).then(function(r){
+      return r.json().then(function(j){ return {status:r.status, j:j}; });
+    }).then(function(x){
+      if(x.status===401){ setErr('Unauthorized — set API token in the sidebar.'); adminSetStatus('Unauthorized'); return; }
+      if(x.status===501){ adminSetStatus('Reload not available in this process'); return; }
+      if(x.j && x.j.ok) adminSetStatus('Reload signaled — watch console/logs for apply result');
+      else adminSetStatus((x.j&&x.j.error)||('HTTP '+x.status));
+      setTimeout(load, 800);
+    }).catch(function(e){ adminSetStatus(String(e)); });
+  }
+  function runResAdd(){
+    var mac=gid('admin-res-mac'), ip=gid('admin-res-ip'), note=gid('admin-res-note');
+    adminSetStatus('Saving reservation…');
+    fetch('/dhcp/reservations',{method:'POST',headers:Object.assign({'Content-Type':'application/json'}, authHeaders()), body:JSON.stringify({mac:mac,ip:ip,note:note})}).then(function(r){
+      return r.json().then(function(j){ return {status:r.status, j:j}; });
+    }).then(function(x){
+      if(x.status===401){ setErr('Unauthorized — set API token in the sidebar.'); adminSetStatus('Unauthorized'); return; }
+      if(x.j && x.j.ok){
+        var w=(x.j.warnings&&x.j.warnings.length)?' · warnings: '+x.j.warnings.join('; '):'';
+        adminSetStatus((x.j.created?'Added':'Updated')+' '+x.j.mac+' → '+x.j.ip+w);
+        load();
+      } else adminSetStatus((x.j&&x.j.error)||('HTTP '+x.status));
+    }).catch(function(e){ adminSetStatus(String(e)); });
+  }
+  function runResDel(){
+    var mac=gid('admin-res-del-mac');
+    if(!mac){ adminSetStatus('Enter a MAC to remove'); return; }
+    if(!confirm('Remove reservation for '+mac+'?')) return;
+    adminSetStatus('Removing…');
+    fetch('/dhcp/reservations/'+encodeURIComponent(mac),{method:'DELETE',headers:authHeaders()}).then(function(r){
+      return r.json().then(function(j){ return {status:r.status, j:j}; });
+    }).then(function(x){
+      if(x.status===401){ setErr('Unauthorized — set API token in the sidebar.'); adminSetStatus('Unauthorized'); return; }
+      if(x.j && x.j.ok){ adminSetStatus(x.j.removed?('Removed '+x.j.mac):('No reservation for '+x.j.mac)); load(); }
+      else adminSetStatus((x.j&&x.j.error)||('HTTP '+x.status));
+    }).catch(function(e){ adminSetStatus(String(e)); });
+  }
+  ['subnet-in-type','subnet-in-ip','subnet-in-mac','subnet-in-any'].forEach(function(id){
+    var el=document.getElementById(id); if(el) el.addEventListener('input', function(){ renderSubnetTable(); });
+  });
+  var alertsIn=document.getElementById('alerts-in-any'); if(alertsIn) alertsIn.addEventListener('input', function(){ renderAlertsTable(); });
+  var arpIn=document.getElementById('arp-in-any'); if(arpIn) arpIn.addEventListener('input', function(){ renderArpTable(); });
+  var searchBtn=document.getElementById('search-run'); if(searchBtn) searchBtn.onclick=runSearch;
+  var searchIp=document.getElementById('search-ip'); if(searchIp) searchIp.addEventListener('keydown', function(e){ if(e.key==='Enter') runSearch(); });
+  var arpBtn=document.getElementById('arp-scan-btn'); if(arpBtn) arpBtn.onclick=function(){ runArpScan(false); };
+  var arpAllBtn=document.getElementById('arp-scan-all-btn'); if(arpAllBtn) arpAllBtn.onclick=function(){ runArpScan(true); };
+  var checkBtn=document.getElementById('admin-check-btn'); if(checkBtn) checkBtn.onclick=runCheck;
+  var reloadBtn=document.getElementById('admin-reload-btn'); if(reloadBtn) reloadBtn.onclick=runReload;
+  var resAddBtn=document.getElementById('admin-res-add'); if(resAddBtn) resAddBtn.onclick=runResAdd;
+  var resDelBtn=document.getElementById('admin-res-del'); if(resDelBtn) resDelBtn.onclick=runResDel;
   var logChipsHost=document.getElementById('log-chips');
   if(logChipsHost) logChipsHost.addEventListener('click', function(e){
     var btn=e.target.closest('button[data-log-chip-idx]');
@@ -1001,6 +1606,7 @@ const dhcpDashboardHTMLPart3 = `
     var rows=[
       ['Gateway', dh.gateway||'—'],
       ['Reservations', String(dh.reservations_n|0)],
+      ['Banned MACs', String(dh.banned_macs_n|0)],
       ['Lease DB', dh.lease_db_path||'—'],
       ['Lease TTL (s)', String(dh.lease_seconds|0)],
       ['Authoritative', dh.authoritative?'yes':'no']
@@ -1013,6 +1619,12 @@ const dhcpDashboardHTMLPart3 = `
   }
   function renderLeases(d){
     var rows=d.leases_preview||[];
+    configMACData=Array.isArray(d.config_macs)?d.config_macs.slice():[];
+    leasesAllData=Array.isArray(d.leases_all)?d.leases_all.slice():[];
+    subnetData=Array.isArray(d.subnet_details)?d.subnet_details.slice():[];
+    subnetGrid=Array.isArray(d.subnet_grid)?d.subnet_grid.slice():[];
+    findingsData=Array.isArray(d.findings)?d.findings.slice():[];
+    consoleLines=Array.isArray(d.console_lines)?d.console_lines.slice():[];
     var js=JSON.stringify(rows);
     if(js!==lastPreviewJSON){
       lastPreviewJSON=js;
@@ -1043,6 +1655,12 @@ const dhcpDashboardHTMLPart3 = `
       }
     }
     renderLeaseLogFiltered();
+    renderDevicesTable();
+    renderAllLeasesTable();
+    renderSubnetGrid(d.subnet_counts||{});
+    renderSubnetTable();
+    renderAlertsTable();
+    renderConsole();
   }
   function render(d){
     setErr('');
@@ -1096,5 +1714,11 @@ const dhcpDashboardHTMLPart3 = `
 </html>
 `
 
-// dhcpDashboardHTML is the full dashboard document served at GET /stats/dashboard.
-const dhcpDashboardHTML = dhcpDashboardHTMLPart1 + dhcpDashboardHTMLPart2 + dhcpDashboardHTMLPart3
+// buildDHCPDashboardHTML returns the full dashboard document served at GET /stats/dashboard.
+func buildDHCPDashboardHTML(showTokenPanel bool) string {
+	tokenPanel := ""
+	if showTokenPanel {
+		tokenPanel = dhcpDashboardTokenPanel
+	}
+	return dhcpDashboardHTMLPart1 + tokenPanel + dhcpDashboardHTMLPart2 + dhcpDashboardHTMLPart3
+}

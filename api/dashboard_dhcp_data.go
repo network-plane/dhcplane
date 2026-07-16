@@ -26,6 +26,22 @@ type leasePreviewRow struct {
 	AllocatedAt string `json:"allocated_at"`
 	Expiry      string `json:"expiry"`
 	FirstSeen   string `json:"first_seen"`
+	AllocatedTS int64  `json:"allocated_ts"`
+	ExpiryTS    int64  `json:"expiry_ts"`
+	FirstSeenTS int64  `json:"first_seen_ts"`
+}
+
+type configMACRow struct {
+	Kind                string `json:"kind"`
+	MAC                 string `json:"mac"`
+	IP                  string `json:"ip,omitempty"`
+	Note                string `json:"note,omitempty"`
+	FirstSeen           string `json:"first_seen,omitempty"`
+	FirstSeenTS         int64  `json:"first_seen_ts"`
+	EquipmentType       string `json:"equipment_type,omitempty"`
+	Manufacturer        string `json:"manufacturer,omitempty"`
+	ManagementType      string `json:"management_type,omitempty"`
+	ManagementInterface string `json:"management_interface,omitempty"`
 }
 
 func effectiveAuthoritative(cfg *config.Config) bool {
@@ -104,6 +120,7 @@ func buildDHCPDashboardPayload(d *Deps) map[string]any {
 		"authoritative":  effectiveAuthoritative(cfg),
 		"lease_seconds":  cfg.LeaseSeconds,
 		"reservations_n": 0,
+		"banned_macs_n":  len(cfg.BannedMACs),
 		"console_tcp":    strings.TrimSpace(cfg.ConsoleTCPAddress),
 	}
 	if d.Reservations != nil {
@@ -125,28 +142,6 @@ func buildDHCPDashboardPayload(d *Deps) map[string]any {
 	assume := time.Duration(cfg.LeaseSeconds) * time.Second
 	now := time.Now()
 
-	bannedSet := make(map[string]struct{})
-	for m := range cfg.BannedMACs {
-		if nm, err := dhcpserver.CanonMAC(m); err == nil {
-			bannedSet[nm] = struct{}{}
-		} else {
-			nm := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(m), "-", ":"), " ", ""))
-			bannedSet[nm] = struct{}{}
-		}
-	}
-	for nm := range dhcpserver.ParseBannedMACsEnv() {
-		bannedSet[nm] = struct{}{}
-	}
-	isBanned := func(mac string) bool {
-		if nm, err := dhcpserver.CanonMAC(mac); err == nil {
-			_, ok := bannedSet[nm]
-			return ok
-		}
-		nm := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(mac), "-", ":"), " ", ""))
-		_, ok := bannedSet[nm]
-		return ok
-	}
-
 	iter := func(yield func(statistics.LeaseLite)) {
 		d.DB.ForEach(func(l dhcpserver.Lease) {
 			yield(statistics.LeaseLite{
@@ -158,7 +153,6 @@ func buildDHCPDashboardPayload(d *Deps) map[string]any {
 			})
 		})
 	}
-	isDeclined := func(ip string) bool { return d.DB.IsDeclined(ip) }
 
 	perMinute, perHour, perDay, perWeek, perMonth := statistics.CountAllocations(iter, assume, now)
 	allocEvents1h := statistics.ListAllocationEventsInWindow(iter, assume, now, time.Hour, statistics.MaxDashboardAllocationEvents)
@@ -191,6 +185,9 @@ func buildDHCPDashboardPayload(d *Deps) map[string]any {
 			AllocatedAt: dhcpserver.FormatEpoch(l.AllocatedAt),
 			Expiry:      dhcpserver.FormatEpoch(l.Expiry),
 			FirstSeen:   dhcpserver.FormatEpoch(l.FirstSeen),
+			AllocatedTS: l.AllocatedAt,
+			ExpiryTS:    l.Expiry,
+			FirstSeenTS: l.FirstSeen,
 		})
 	})
 	sort.Slice(previews, func(i, j int) bool {
@@ -201,13 +198,81 @@ func buildDHCPDashboardPayload(d *Deps) map[string]any {
 	}
 	payload["leases_preview"] = previews
 
+	var allLeases []leasePreviewRow
+	d.DB.ForEach(func(l dhcpserver.Lease) {
+		allLeases = append(allLeases, leasePreviewRow{
+			IP:          l.IP,
+			MAC:         l.MAC,
+			Hostname:    l.Hostname,
+			AllocatedAt: dhcpserver.FormatEpoch(l.AllocatedAt),
+			Expiry:      dhcpserver.FormatEpoch(l.Expiry),
+			FirstSeen:   dhcpserver.FormatEpoch(l.FirstSeen),
+			AllocatedTS: l.AllocatedAt,
+			ExpiryTS:    l.Expiry,
+			FirstSeenTS: l.FirstSeen,
+		})
+	})
+	sort.Slice(allLeases, func(i, j int) bool {
+		return dashboardIPKey(allLeases[i].IP) < dashboardIPKey(allLeases[j].IP)
+	})
+	payload["leases_all"] = allLeases
+
 	var reservations config.Reservations
 	if d.Reservations != nil {
 		reservations = d.Reservations()
 	}
-	detailRows, err := statistics.BuildDetailRows(*cfg, reservations, iter, isDeclined, isBanned, now)
+	configMACs := make([]configMACRow, 0, len(reservations)+len(cfg.BannedMACs))
+	for mac, r := range reservations {
+		configMACs = append(configMACs, configMACRow{
+			Kind:                "reservation",
+			MAC:                 mac,
+			IP:                  r.IP,
+			Note:                r.Note,
+			FirstSeen:           dhcpserver.FormatEpoch(r.FirstSeen),
+			FirstSeenTS:         r.FirstSeen,
+			EquipmentType:       r.EquipmentType,
+			Manufacturer:        r.Manufacturer,
+			ManagementType:      r.ManagementType,
+			ManagementInterface: r.ManagementInterface,
+		})
+	}
+	for mac, meta := range cfg.BannedMACs {
+		configMACs = append(configMACs, configMACRow{
+			Kind:                "banned",
+			MAC:                 mac,
+			Note:                meta.Note,
+			FirstSeen:           dhcpserver.FormatEpoch(meta.FirstSeen),
+			FirstSeenTS:         meta.FirstSeen,
+			EquipmentType:       meta.EquipmentType,
+			Manufacturer:        meta.Manufacturer,
+			ManagementType:      meta.ManagementType,
+			ManagementInterface: meta.ManagementInterface,
+		})
+	}
+	sort.Slice(configMACs, func(i, j int) bool {
+		a, b := configMACs[i], configMACs[j]
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		return strings.ToLower(a.MAC) < strings.ToLower(b.MAC)
+	})
+	payload["config_macs"] = configMACs
+	detailRows, counts, err := buildSubnetDetailPayload(d)
 	if err == nil {
 		payload["subnet_detail_count"] = len(detailRows)
+		payload["subnet_details"] = detailRows
+		payload["subnet_counts"] = counts
+		payload["subnet_grid"] = buildSubnetGridCells(detailRows)
+	}
+	if d.RecentFindings != nil {
+		payload["findings"] = d.RecentFindings(100)
+	} else {
+		payload["findings"] = []FindingEvent{}
+	}
+	if d.ConsoleLines != nil {
+		payload["console_lines"] = d.ConsoleLines(250)
+	} else {
+		payload["console_lines"] = []ConsoleLine{}
 	}
 
 	return payload
@@ -254,7 +319,8 @@ func dashboardPageHandler(w http.ResponseWriter, r *http.Request, d *Deps) {
 	if !requireStatsDashboard(w, r, cfg != nil && cfg.StatsDashboardHTMLEnabled()) {
 		return
 	}
+	showTokenPanel := cfg != nil && strings.TrimSpace(cfg.APIAuthToken) != ""
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(dhcpDashboardHTML))
+	_, _ = w.Write([]byte(buildDHCPDashboardHTML(showTokenPanel)))
 }

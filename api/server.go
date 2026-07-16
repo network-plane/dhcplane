@@ -43,7 +43,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = enc.Encode(v)
 }
 
-// RegisterDHCPRoutes wires read-only DHCP/lease REST handlers (expects auth middleware applied on parent router if needed).
+// RegisterDHCPRoutes wires DHCP/lease REST handlers plus optional admin/ops routes
+// (expects auth middleware applied on parent router if needed).
 func RegisterDHCPRoutes(router chi.Router, deps *Deps) {
 	if router == nil || deps == nil {
 		return
@@ -54,7 +55,17 @@ func RegisterDHCPRoutes(router chi.Router, deps *Deps) {
 	router.Get("/version", func(w http.ResponseWriter, r *http.Request) { versionHandler(w, r, d) })
 	router.Get("/dhcp/leases", func(w http.ResponseWriter, r *http.Request) { leasesHandler(w, r, d) })
 	router.Get("/dhcp/reservations", func(w http.ResponseWriter, r *http.Request) { reservationsHandler(w, r, d) })
+	router.Post("/dhcp/reservations", func(w http.ResponseWriter, r *http.Request) { reservationAddHandler(w, r, d) })
+	router.Delete("/dhcp/reservations/{mac}", func(w http.ResponseWriter, r *http.Request) { reservationDeleteHandler(w, r, d) })
 	router.Get("/dhcp/stats", func(w http.ResponseWriter, r *http.Request) { statsHandler(w, r, d) })
+	router.Get("/dhcp/subnet", func(w http.ResponseWriter, r *http.Request) { subnetDetailsHandler(w, r, d) })
+	router.Get("/dhcp/search/{ip}", func(w http.ResponseWriter, r *http.Request) { searchIPHandler(w, r, d) })
+	router.Get("/dhcp/search", func(w http.ResponseWriter, r *http.Request) { searchIPHandler(w, r, d) })
+	router.Post("/dhcp/arp/scan", func(w http.ResponseWriter, r *http.Request) { arpScanHandler(w, r, d) })
+	router.Get("/admin/check", func(w http.ResponseWriter, r *http.Request) { checkHandler(w, r, d) })
+	router.Post("/admin/reload", func(w http.ResponseWriter, r *http.Request) { reloadHandler(w, r, d) })
+	router.Get("/admin/findings", func(w http.ResponseWriter, r *http.Request) { findingsHandler(w, r, d) })
+	router.Get("/admin/console/lines", func(w http.ResponseWriter, r *http.Request) { consoleLinesHandler(w, r, d) })
 	router.Get("/stats/dashboard", func(w http.ResponseWriter, r *http.Request) { dashboardPageHandler(w, r, d) })
 	router.Get("/stats/dashboard/data", func(w http.ResponseWriter, r *http.Request) { dashboardDataHandler(w, r, d) })
 	router.Get("/stats/dashboard/ws", func(w http.ResponseWriter, r *http.Request) { dashboardWebSocketHandler(w, r, d) })

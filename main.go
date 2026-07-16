@@ -1,11 +1,6 @@
 package main
 
 import (
-	"dhcplane/api"
-	"dhcplane/arp"
-	"dhcplane/config"
-	"dhcplane/dhcpserver"
-	"dhcplane/statistics"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +20,12 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"dhcplane/api"
+	"dhcplane/arp"
+	"dhcplane/config"
+	"dhcplane/dhcpserver"
+	"dhcplane/statistics"
+
 	"github.com/fsnotify/fsnotify"
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/logrusorgru/aurora"
@@ -33,7 +34,7 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-var appVersion = "0.2.71"
+var appVersion = "0.2.93"
 
 func buildConsoleConfig(maxLines int) planeconsole.Config {
 	if maxLines <= 0 {
@@ -627,6 +628,14 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 		}
 	}
 
+	findingsRing := newFindingRing(100)
+	consoleRing := newConsoleRing(400)
+	var ifaceAtomic atomic.Value
+	ifaceAtomic.Store(cfg.Interface)
+	var reservationsPathAtomic atomic.Value
+	reservationsPathAtomic.Store(reservationsPath)
+	var reservationsMu sync.Mutex
+
 	// Sinks
 	logSink := func(format string, args ...any) {
 		msg := fmt.Sprintf(format, args...)
@@ -636,6 +645,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 		}
 
 		ts := time.Now().Format("2006/01/02 15:04:05.000000")
+		consoleRing.Append(ts, msg)
 
 		if consoleBroker != nil {
 			consoleBroker.Append(ts + " " + msg)
@@ -656,6 +666,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 			lg.Printf("%s", msg)
 		}
 		ts := time.Now().Format("2006/01/02 15:04:05.000000")
+		consoleRing.Append(ts, msg)
 		if consoleBroker != nil {
 			consoleBroker.Append(ts + " " + msg)
 		}
@@ -697,6 +708,53 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 			}
 			return strings.TrimSpace(c.APIAuthToken)
 		},
+		ConfigPath: cfgPath,
+		ReservationsPath: func() string {
+			if v, ok := reservationsPathAtomic.Load().(string); ok {
+				return v
+			}
+			return reservationsPath
+		},
+		BoundIface: func() string {
+			if v, ok := ifaceAtomic.Load().(string); ok {
+				return v
+			}
+			return ""
+		},
+		ReloadConfig: func() error {
+			p, err := os.FindProcess(os.Getpid())
+			if err != nil {
+				return err
+			}
+			return p.Signal(syscall.SIGHUP)
+		},
+		UpdateReservations: func(mutator api.ReservationMutator) error {
+			if mutator == nil {
+				return fmt.Errorf("nil reservation mutator")
+			}
+			reservationsMu.Lock()
+			defer reservationsMu.Unlock()
+			cur := reservationsGet()
+			next, err := mutator(cur)
+			if err != nil {
+				return err
+			}
+			if next == nil {
+				next = make(config.Reservations)
+			}
+			path := reservationsPath
+			if v, ok := reservationsPathAtomic.Load().(string); ok && strings.TrimSpace(v) != "" {
+				path = v
+			}
+			if err := config.SaveReservations(path, next); err != nil {
+				return err
+			}
+			reservationsAtomic.Store(next)
+			dhcpserver.EnforceReservationLeaseConsistency(db, next)
+			return nil
+		},
+		RecentFindings: findingsRing.Snapshot,
+		ConsoleLines:   consoleRing.Snapshot,
 	}
 	applyAPI := func() {
 		c := cfgGet()
@@ -772,6 +830,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 		}
 		closerUDP = c
 		currentIface = newIface
+		ifaceAtomic.Store(newIface)
 		dhcpServing.Store(true)
 		return nil
 	}
@@ -801,7 +860,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 			defer timer.Stop()
 			select {
 			case <-timer.C:
-				triggerARPScan(cfgGet, reservationsGet, db, currentIface, logSink, errorSink, false)
+				triggerARPScan(cfgGet, reservationsGet, db, currentIface, logSink, errorSink, findingsRing, false)
 			case <-stopARP:
 				return
 			}
@@ -810,7 +869,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 			for {
 				select {
 				case <-tk.C:
-					triggerARPScan(cfgGet, reservationsGet, db, currentIface, logSink, errorSink, false)
+					triggerARPScan(cfgGet, reservationsGet, db, currentIface, logSink, errorSink, findingsRing, false)
 				case <-stopARP:
 					return
 				}
@@ -830,7 +889,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 			defer timer.Stop()
 			select {
 			case <-timer.C:
-				triggerDHCPServerScan(cfgGet, currentIface, logSink, errorSink)
+				triggerDHCPServerScan(cfgGet, currentIface, logSink, errorSink, findingsRing)
 			case <-stopDHCP:
 				return
 			}
@@ -839,7 +898,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 			for {
 				select {
 				case <-tk.C:
-					triggerDHCPServerScan(cfgGet, currentIface, logSink, errorSink)
+					triggerDHCPServerScan(cfgGet, currentIface, logSink, errorSink, findingsRing)
 				case <-stopDHCP:
 					return
 				}
@@ -852,13 +911,16 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 	var watcher *fsnotify.Watcher
 	var watcherErr error
 	if cfg.AutoReload {
-		watcher, watcherErr = startConfigWatcher(cfgPath, reservationsPath, func(newCfg config.Config, newReservations config.Reservations, newWarns []string) {
+		watcher, watcherErr = startConfigWatcher(cfgPath, reservationsPath, func(newCfg config.Config, newReservations config.Reservations, newReservationsPath string, newWarns []string) {
 			// Compare authoritative before swapping
 			oldAuth := effectiveAuthoritative(cfgGet())
 			newAuth := effectiveAuthoritative(&newCfg)
 
 			cfgAtomic.Store(&newCfg)
 			reservationsAtomic.Store(newReservations)
+			if strings.TrimSpace(newReservationsPath) != "" {
+				reservationsPathAtomic.Store(newReservationsPath)
+			}
 			for _, w := range newWarns {
 				logSink("%s", w)
 			}
@@ -962,6 +1024,7 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 
 			cfgAtomic.Store(&newCfg)
 			reservationsAtomic.Store(reservationsNew)
+			reservationsPathAtomic.Store(reservationsPathNew)
 			dhcpserver.EnforceReservationLeaseConsistency(db, reservationsNew)
 			if newCfg.CompactOnLoad {
 				if n := db.CompactNow(time.Duration(newCfg.LeaseStickySeconds) * time.Second); n > 0 {
@@ -1002,12 +1065,12 @@ func buildServerAndRun(cfgPath string, enableConsole bool, overrides PathOverrid
 
 /* ----------------- Watcher ----------------- */
 
-// startConfigWatcher watches cfgPath and reservations file, calls onApply(validatedCfg,reservations,warns) after successful parses.
+// startConfigWatcher watches cfgPath and reservations file, calls onApply(validatedCfg,reservations,reservationsPath,warns) after successful parses.
 // It also performs the first_seen stamping persist just like the HUP path.
 func startConfigWatcher(
 	cfgPath string,
 	reservationsPath string,
-	onApply func(config.Config, config.Reservations, []string),
+	onApply func(config.Config, config.Reservations, string, []string),
 	logf func(string, ...any),
 ) (*fsnotify.Watcher, error) {
 	w, err := fsnotify.NewWatcher()
@@ -1108,7 +1171,7 @@ func startConfigWatcher(
 					continue
 				}
 
-				onApply(norm, reservationsNew, warns)
+				onApply(norm, reservationsNew, reservationsPathNew, warns)
 
 			case err := <-w.Errors:
 				logf("watcher error: %v", err)
@@ -1116,6 +1179,96 @@ func startConfigWatcher(
 		}
 	}()
 	return w, nil
+}
+
+/* ----------------- API/dashboard rings ----------------- */
+
+type findingRing struct {
+	mu   sync.Mutex
+	cap  int
+	ring []api.FindingEvent
+}
+
+func newFindingRing(capacity int) *findingRing {
+	if capacity <= 0 {
+		capacity = 100
+	}
+	return &findingRing{cap: capacity}
+}
+
+func (r *findingRing) Append(ev api.FindingEvent) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ring = append(r.ring, ev)
+	if len(r.ring) > r.cap {
+		r.ring = append([]api.FindingEvent(nil), r.ring[len(r.ring)-r.cap:]...)
+	}
+}
+
+func (r *findingRing) Snapshot(limit int) []api.FindingEvent {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if limit <= 0 || limit > len(r.ring) {
+		limit = len(r.ring)
+	}
+	if limit == 0 {
+		return []api.FindingEvent{}
+	}
+	out := make([]api.FindingEvent, limit)
+	copy(out, r.ring[len(r.ring)-limit:])
+	// newest first
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
+}
+
+type consoleRing struct {
+	mu   sync.Mutex
+	cap  int
+	ring []api.ConsoleLine
+}
+
+func newConsoleRing(capacity int) *consoleRing {
+	if capacity <= 0 {
+		capacity = 400
+	}
+	return &consoleRing{cap: capacity}
+}
+
+func (r *consoleRing) Append(at, text string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ring = append(r.ring, api.ConsoleLine{At: at, Text: text})
+	if len(r.ring) > r.cap {
+		r.ring = append([]api.ConsoleLine(nil), r.ring[len(r.ring)-r.cap:]...)
+	}
+}
+
+func (r *consoleRing) Snapshot(limit int) []api.ConsoleLine {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if limit <= 0 || limit > len(r.ring) {
+		limit = len(r.ring)
+	}
+	if limit == 0 {
+		return []api.ConsoleLine{}
+	}
+	out := make([]api.ConsoleLine, limit)
+	copy(out, r.ring[len(r.ring)-limit:])
+	return out
 }
 
 /* ----------------- Stats helpers ----------------- */
@@ -1190,7 +1343,6 @@ func main() {
 	var (
 		cfgPath          string
 		console          bool
-		showVersion      bool
 		leasesPath       string
 		reservationsPath string
 		logFilePath      string
@@ -1198,10 +1350,11 @@ func main() {
 	)
 
 	root := &cobra.Command{
-		Use:   "dhcplane",
-		Short: "DHCPv4 server (insomniacslk/dhcp) with JSON config, reservations (with notes), logging, sticky leases, stats, and live reload",
+		Use:     "dhcplane",
+		Short:   "DHCPv4 server (insomniacslk/dhcp) with JSON config, reservations (with notes), logging, sticky leases, stats, and live reload",
+		Version: appVersion,
 	}
-	root.PersistentFlags().BoolVarP(&showVersion, "version", "", false, "Print version and exit")
+	root.SetVersionTemplate("{{.Version}}\n")
 	root.PersistentFlags().StringVarP(&cfgPath, "config", "", "dhcplane.config", "Path to config file")
 	// authoritative is now config-driven; flag removed
 	root.PersistentFlags().BoolVar(&console, "console", false, "Export console over UNIX socket (or TCP if console_tcp_address is set) in addition to stdout/stderr logging")
@@ -1213,10 +1366,6 @@ func main() {
 
 	// Migrate old config filename if needed
 	root.PersistentPreRunE = func(_ *cobra.Command, _ []string) error {
-		if showVersion {
-			fmt.Println(appVersion)
-			os.Exit(0)
-		}
 		// Migrate old config filename before any command runs
 		if err := migrateConfigFilename(cfgPath); err != nil {
 			return err
@@ -1875,17 +2024,19 @@ func triggerARPScan(
 	db *dhcpserver.LeaseDB,
 	iface string,
 	logf, errf func(string, ...any),
+	findings *findingRing,
 	_ bool, // allIfaces currently unused here; keep for future
 ) {
 	cfg := cfgGet()
 	reservations := reservationsGet()
-	entries, findings, err := arp.Scan(cfg, reservations, db, iface, false, time.Second*3)
+	entries, findingsList, err := arp.Scan(cfg, reservations, db, iface, false, time.Second*3)
 	if err != nil {
 		errf("ARP scan error: %v", err)
 		return
 	}
 	_ = entries // reserved for future use
-	for _, f := range findings {
+	now := time.Now()
+	for _, f := range findingsList {
 		// Build log message with conditional MAC fields
 		msg := fmt.Sprintf("ARP-ANOMALY ip=%s mac=%s iface=%s reason=%s found=%s reserved=%t leased=%t excluded=%t",
 			f.IP, f.MAC, f.Iface, f.Reason, f.Found, f.Reserved, f.Leased, f.Excluded)
@@ -1896,6 +2047,23 @@ func triggerARPScan(
 			msg += fmt.Sprintf(" res_mac=%s", f.ResMAC)
 		}
 		logf("%s", msg)
+		if findings != nil {
+			findings.Append(api.FindingEvent{
+				Kind:     "arp",
+				At:       now.Format("2006/01/02 15:04:05"),
+				AtUnix:   now.Unix(),
+				IP:       f.IP,
+				MAC:      f.MAC,
+				Iface:    f.Iface,
+				Reason:   f.Reason,
+				LeaseMAC: f.LeaseMAC,
+				ResMAC:   f.ResMAC,
+				Reserved: f.Reserved,
+				Leased:   f.Leased,
+				Excluded: f.Excluded,
+				Message:  msg,
+			})
+		}
 	}
 }
 
@@ -1904,6 +2072,7 @@ func triggerDHCPServerScan(
 	cfgGet func() *config.Config,
 	iface string,
 	logf, errf func(string, ...any),
+	findings *findingRing,
 ) {
 	cfg := cfgGet()
 	if !cfg.DetectDHCPServers.Enabled {
@@ -2029,6 +2198,18 @@ func triggerDHCPServerScan(
 			peerIP = peerAddr.IP.String()
 		}
 		logf("FOREIGN-DHCP-SERVER detected server_ip=%s from=%s iface=%s", serverID, peerIP, iface)
+		if findings != nil {
+			now := time.Now()
+			findings.Append(api.FindingEvent{
+				Kind:     "foreign_dhcp",
+				At:       now.Format("2006/01/02 15:04:05"),
+				AtUnix:   now.Unix(),
+				Iface:    iface,
+				ServerIP: serverID,
+				From:     peerIP,
+				Message:  fmt.Sprintf("FOREIGN-DHCP-SERVER detected server_ip=%s from=%s iface=%s", serverID, peerIP, iface),
+			})
+		}
 	}
 
 	// Log completion
