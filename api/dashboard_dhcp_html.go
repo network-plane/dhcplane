@@ -475,14 +475,15 @@ const dhcpDashboardHTMLPart1 = `<!DOCTYPE html>
     }
     .subnet-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(14px, 1fr));
-      gap: 2px;
+      grid-template-columns: repeat(32, 21px);
+      gap: 3px;
       margin: 0.75rem 0 1rem 0;
       max-width: 100%;
+      overflow-x: auto;
     }
     .subnet-cell {
-      width: 100%;
-      aspect-ratio: 1;
+      width: 21px;
+      height: 21px;
       border-radius: 2px;
       border: 1px solid transparent;
       cursor: default;
